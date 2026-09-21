@@ -244,9 +244,68 @@ default and logs loudly — per key, so one bad value never discards a good one.
 The build log is the unusual one. It is kept as a running record including the
 mistakes, because the mistakes are most of the value.
 
+## Credits
+
+This project is mostly glue around other people's good work, plus a lot of
+reading. Everything below was genuinely used or consulted.
+
+### Runtime dependencies
+
+| | |
+|---|---|
+| **[Network UPS Tools](https://networkupstools.org/)** ([repo](https://github.com/networkupstools/nut)) | the entire UPS layer — `usbhid-ups`, `upsd`, `upsmon`, `upscmd`. The wire protocol is simple enough to speak directly, which is what the collector does. |
+| **[ntfy](https://github.com/binwiederhier/ntfy)** by Philipp Heckel | push notifications, self-hosted. A single Go binary that costs ~45 MB of RAM and needed no tuning. |
+| **[uPlot](https://github.com/leeoniya/uPlot)** by Leon Sorokin | the episode charts. ~45 KB, no dependencies, and fast enough for a 2-core ARM board — vendored rather than pulled from a CDN so the dashboard works offline. |
+| **[Tailscale](https://tailscale.com/)** | HTTPS and a hostname for the dashboard without exposing it. `tailscale serve` is what makes the PWA installable at all. |
+| **[cloudflared](https://github.com/cloudflare/cloudflared)** | publishes only the ntfy endpoint, since a phone is not always on the tailnet. |
+| **[BusyBox](https://busybox.net/)** `devmem` | naturally-aligned MMIO access for the Ethernet LED registers. Python's `mmap` raises SIGBUS there on ARM. |
+
+### Sources that solved specific problems
+
+- **[coreboot](https://github.com/coreboot/coreboot)** — `src/drivers/net/r8168.c`
+  documents the RTL8111/8168 LED configuration register at offset `0x18` and
+  the `0x50` config lock. Nearly every other guide describes the RTL8211F PHY
+  and MDIO page `0xd04`, which is *different hardware* and does not apply to
+  the Jetson Nano dev kit's PCIe Realtek.
+- **[Chrome for Developers](https://developer.chrome.com/blog/update-install-criteria)**
+  and **[web.dev](https://web.dev/learn/pwa/update)** — current PWA
+  installability criteria and service-worker update strategy. The
+  [Workbox notes on update handling](https://developer.chrome.com/docs/workbox/handling-service-worker-updates)
+  are why this uses network-first plus a build stamp rather than a hand-bumped
+  cache version.
+- **[MDN — Making PWAs installable](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Making_PWAs_installable)**
+- **[NVIDIA Jetson developer forums](https://forums.developer.nvidia.com/c/agx-autonomous-machines/jetson-embedded-systems/70)**
+  — confirmation that the Nano's green power LED is driven by GPIO04 and is
+  not exposed without a device-tree change.
+- **[Arch Wiki](https://wiki.archlinux.org/)** — hibernation into a swapfile,
+  `resume=` / `resume_offset=`, and the dracut/`kernel-install` path. Its
+  warning that generated loader entries must not be hand-edited saved a
+  silent breakage months down the line.
+- **[systemd documentation](https://www.freedesktop.org/software/systemd/man/systemd.service.html)**
+  — `StartLimitIntervalSec`, drop-in overrides, and `Type=oneshot` semantics,
+  which is why a succeeded oneshot is no longer reported as a failure here.
+- **[polkit](https://www.freedesktop.org/software/polkit/docs/latest/)** — the
+  narrow authorisation rule for `org.freedesktop.login1.hibernate`. Needed
+  because `NoNewPrivileges=yes` makes sudo inert, which is not obvious until
+  it silently does nothing.
+
+### Hardware documentation
+
+- APC Back-UPS HID tables via NUT's `usbhid-ups` driver — the definitive
+  answer to what a given UPS can and cannot do. **Run `upscmd -l` on yours
+  before designing around killpower.**
+- Realtek RTL8111H register layout, for the LED control bitfield.
+
+### Built with
+
+Developed with [Claude Code](https://claude.com/claude-code). The build log in
+[docs/BUILD-LOG.md](docs/BUILD-LOG.md) is the unedited record, including the
+wrong turns.
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
 
-Built with [NUT](https://networkupstools.org/), [uPlot](https://github.com/leeoniya/uPlot)
-and [ntfy](https://github.com/binwiederhier/ntfy).
+Third-party components keep their own licences: NUT is GPLv2+, ntfy is
+Apache-2.0/GPLv2, uPlot is MIT, cloudflared is Apache-2.0. No third-party
+source is vendored here except `uPlot` (MIT), under `src/ups-dash/web/vendor/`.

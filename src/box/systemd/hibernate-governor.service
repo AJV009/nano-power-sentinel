@@ -1,0 +1,13 @@
+[Unit]
+Description=Adaptive hibernate governor (UPS-aware)
+After=network-online.target nut-monitor.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/hibernate-governor
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
