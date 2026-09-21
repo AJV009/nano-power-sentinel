@@ -28,7 +28,7 @@ The instant mode is synchronous and has no abort -- that is the point of it.
 import threading
 import time
 
-from . import states, upscmd
+from . import hold, states, upscmd
 
 SAFE_DELAY = 15          # brief window so the safe path stays abortable
 LOAD_WAIT = 180.0        # how long to wait for the draw to fall
@@ -155,6 +155,9 @@ def request(collector, store, body):
         if PENDING.get("active"):
             return {"error": "a shutdown sequence is already running",
                     "state": dict(PENDING)}, 409
+
+    # Either mode is a human deciding the box should be off: hold it off.
+    hold.set_hold("emergency %s shutdown" % mode)
 
     if mode == "instant":
         collector.cause.declare_intent(states.CAUSE_EMERGENCY_INSTANT, time.time())

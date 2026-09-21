@@ -8,7 +8,7 @@
 # The LED configuration lives in the controller's own register map.
 #
 # BAR2 is the register map, confirmed by reading the MAC back from offset 0:
-#   0x13004000 -> 0xE64B0400  == 00:04:4b:e6 little-endian.  BAR4 reads zero.
+#   0x13004000 -> 0x33CCBBAA  == aa:bb:cc:33 little-endian.  BAR4 reads zero.
 #
 # LEDSEL is the 16-bit register at offset 0x18:
 #   bits [15:12] LED feature control

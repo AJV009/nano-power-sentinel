@@ -29,6 +29,20 @@ function effect(def, value, tun) {
     const ram = (((LAST.box || {}).last_vitals || {}).mem || {}).used_gb;
     if (isNum(ram)) return `With ${num(ram, 1)} GiB in use, the estimated write takes ${dur(ram / value)}.`;
   }
+  if (def.key === "wake_tries" || def.key === "wake_interval_sec") {
+    // Shows the whole window rather than two numbers in isolation. A 10 s
+    // interval once meant five packets in ~41 s, the box took ~49 s to
+    // resume, and the sentinel declared failure two seconds before it came
+    // up. The sentinel now waits RESUME_GRACE after the last packet, so a
+    // short interval is no longer harmful -- this just makes the timing
+    // visible instead of surprising.
+    const tries = def.key === "wake_tries" ? value : tun.wake_tries;
+    const every = def.key === "wake_interval_sec" ? value : tun.wake_interval_sec;
+    if (isNum(tries) && isNum(every)) {
+      const span = Math.max(0, (tries - 1) * every);
+      return `${num(tries)} packets over ${dur(span)}, then up to 2m more for the box to finish resuming before it is reported as failed.`;
+    }
+  }
   if (def.key === "mains_stable_sec") {
     return `After mains returns, the box waits at least ${dur(value)} before it is allowed to wake.`;
   }

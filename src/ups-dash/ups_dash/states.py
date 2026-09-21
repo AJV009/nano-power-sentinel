@@ -78,7 +78,7 @@ def _fmt_secs(sec):
 
 
 def classify(ups, box_state, down_cause, tunables, episode=None,
-             ups_cut=None, eta_hibernate_sec=None):
+             ups_cut=None, eta_hibernate_sec=None, wake_hold=None):
     """Return the authoritative view of what is happening.
 
     Pure: no I/O, no clock reads beyond what is passed in. Everything the UI
@@ -147,6 +147,31 @@ def classify(ups, box_state, down_cause, tunables, episode=None,
                    "Running from the pack. The governor will hibernate the box "
                    "while enough charge remains to finish writing the image.",
                    action=None)
+
+    # A human switched it off. This outranks "on battery": the outage did not
+    # take this box down, and the sentinel will not wake it afterwards. The
+    # previous order checked on_batt first and showed the outage state --
+    # whose own text promised the box "will be woken once mains returns",
+    # which the wake hold makes untrue.
+    manual = (down_cause in MANUAL_CAUSES) or bool(wake_hold)
+    if box_state != "awake" and manual:
+        # The hold alone proves a human did it, even if the precise cause
+        # was lost (a collector restart, say) -- never say "unknown" here.
+        how = (CAUSE_LABEL[down_cause] if down_cause in MANUAL_CAUSES
+               else "you switched it off")
+        if on_batt:
+            detail = ("Power is out and the pack is at %s%%, but that is not why "
+                      "the box is off. It will stay off when mains returns -- "
+                      "the sentinel does not undo a deliberate shutdown. Use "
+                      "Wake when you want it back." % _n(charge))
+        else:
+            detail = ("Mains is fine and the pack is at %s%%. The sentinel will "
+                      "NOT wake it automatically -- it only restores a box that "
+                      "went down because of an outage. Use Wake when you want "
+                      "it back." % _n(charge))
+        return _mk(MANUAL_DOWN, "Box off (by you)",
+                   "Box is down · %s%s" % (how, " · power out" if on_batt else ""),
+                   detail, action="Wake (WoL) from the box controls.")
 
     # 4. On battery, box already down -> it hibernated for the outage.
     if on_batt:

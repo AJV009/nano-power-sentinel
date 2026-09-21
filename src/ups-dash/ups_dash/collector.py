@@ -21,7 +21,7 @@ from .journal import JournalTail
 from .notify import Notifier
 from .sample import flatten
 from .tunables import Learner
-from . import settings, states, upsoff
+from . import hold, settings, states, upsoff
 from .cause import CauseTracker
 
 UPS_POLL = 1.0
@@ -191,12 +191,14 @@ class Collector(object):
         # Surfaced live so the UI can show a countdown and an abort button
         # while a scheduled output cut is still cancellable.
         snap["ups_cut"] = upsoff.state()
+        snap["wake_hold"] = hold.get_hold()
         # The authoritative reading of what is happening. Every piece of
         # user-facing text -- state line, timeline, notifications -- is built
         # from this one call so they cannot drift apart.
         snap["state"] = states.classify(
             ups, box_state, down_cause, self.tunables, snap["episode"],
-            snap["ups_cut"], snap["derived"].get("eta_hibernate_sec"))
+            snap["ups_cut"], snap["derived"].get("eta_hibernate_sec"),
+            snap.get("wake_hold"))
         # Enqueue-only: all network I/O happens on the notifier's own thread,
         # so an unreachable ntfy server can never stall power monitoring.
         try:

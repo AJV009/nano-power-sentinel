@@ -1457,7 +1457,7 @@ not the RTL8211F PHY -- so the widely-cited MDIO "page 0xd04" recipe does not
 apply. The LED config is in the controller's own register map.
 
     BAR2 confirmed by reading the MAC back from offset 0:
-      0x13004000 -> 0xE64B0400  == 00:04:4b:e6 little-endian   (BAR4 reads 0)
+      0x13004000 -> 0x33CCBBAA  == aa:bb:cc:33 little-endian   (BAR4 reads 0)
 
     LEDSEL, 16-bit at 0x18:  [15:12] feature  [11:8] LED2  [7:4] LED1  [3:0] LED0
     stock 0x0084 -> LED0=4, LED1=8 driven;  set to 0x0000 -> both dark
@@ -1481,3 +1481,99 @@ boot risk on the machine running the UPS sentinel. Tape is the better answer.
 
 **Undo:** `sudo systemctl disable --now eth-leds-off.service eth-leds-off.timer`
 then `sudo /usr/local/sbin/eth-leds on`.
+
+---
+
+## 2026-09-21 — The box woke itself: a manual shutdown overruled by the sentinel
+
+### What happened
+
+The box was hibernated by hand from the dashboard at 19:05. Power failed at
+20:30 and returned at 21:04, and at 21:06 **the sentinel woke the box** --
+overriding a deliberate human decision made 85 minutes before the outage.
+
+Traced from the logs rather than guessed:
+
+    19:05:47  logind: hibernate requested ... (unit box-agent.service)
+    19:05:47  dashboard event: manual_hibernate_requested
+    20:30:18  sentinel: MAINS LOST
+    21:06:52  sentinel: gate passed - sending WoL (1/5)
+    21:07:41  box: returned from hibernate        <- the "auto start"
+
+### Four bugs, all fixed and tested
+
+**1. The sentinel armed its wake on ANY outage.** `outage_seen = True` fired
+whether or not the box was up, so a box already off was "recovered" as though
+the outage had taken it.
+
+Fixed with two guards. **Guard A**: arm only for a box that was up when mains
+failed. **Guard B**: a *wake hold* file, written by the dashboard on Hibernate
+or emergency shutdown, which the sentinel refuses to wake through. Guard A
+alone cannot cover hibernating *during* an outage -- the box was up when mains
+failed, so it looks like an outage casualty.
+
+⚠ The obvious one-line fix, `outage_seen = box_up()`, would have broken
+**flapping power**: once the governor has taken the box down, a brief return
+of mains would re-evaluate from "is it up?" and disarm the wake permanently.
+The actual fix is `outage_seen = outage_seen or box_up()`.
+
+**2. Deliberate hibernates were reported as "Box unreachable".** `cause.py`
+cleared the declared intent on every tick the box still *looked* awake -- and
+after a hibernate request it keeps looking awake for up to 15 s, the poll
+grace window. The intent was wiped before the box ever went down.
+
+⚠ **This path had never worked.** Earlier tests passed a cause straight into
+`classify()` and never drove the real sequence. The one live test only looked
+right because a later restart let `recover_from_store()` reconstruct the cause
+from the event log, which masked it completely.
+
+**3. A misleading 20:30 "Box hibernated".** A rule upgraded an *unknown* cause
+to *outage* once the UPS went on battery, relabelling the 19:05 hibernate.
+Removed: cause is attributed on the down-transition, so "unknown" already
+means it went down while mains was fine.
+
+**4. A false "needs manual attention".** With `wake_interval` at 10 s, five
+packets spanned ~41 s; the resume took ~49 s, and the sentinel declared
+failure two seconds before the box came up. It now waits `RESUME_GRACE`
+(120 s) after the last packet.
+
+### Found during the live verification
+
+**5. The state model checked "on battery" before the cause.** A box you
+switch off during an outage showed the outage state, whose own text promised
+it "will be woken once mains returns" -- untrue once the hold exists. A manual
+shutdown now outranks on-battery in `classify()`.
+
+### Tests prove the old code was broken, not just that the new code passes
+
+`tests/test_sentinel.py` drives the **real** sentinel `main()` loop on a
+virtual clock, replacing only the I/O edges. `tests/test_cause.py` drives the
+real intent-then-grace-then-gone sequence.
+
+    sentinel   old code 2/5   (fails A, D, E)    fixed 5/5
+    cause.py   old code 2/4   (both symptoms)    fixed 4/4
+
+⚠ The first version of test E **passed on the old code**, so it proved
+nothing: the box came up exactly on the tick before the "exhausted" check.
+Tightened to reproduce the real timing. A test that cannot fail against the
+bug it targets is not a test.
+
+### Verified live, during a real outage
+
+Deployed mid-outage; the sentinel re-armed correctly on restart. Then
+hibernated from the dashboard:
+
+    box        down in ~7 s
+    down_cause manual_hibernate        (was "unknown" at 19:05)
+    state      Box is down · you hibernated it · power out
+    hold       hibernated from the dashboard
+
+### Not yet done
+
+`upssched-cmd` on the box still logs a stale "GPU capped 150W ... hibernate in
+60s". Cosmetic -- it schedules nothing, and the cap call is a no-op. It could
+not be fixed tonight because **the box is deliberately hibernated**. It had
+also never been mirrored; `pull-state.sh` now captures it.
+
+**Undo:** the pre-fix sentinel is at `/usr/local/sbin/ups-sentinel.pre-hold-*`
+on the jetson. Removing `/var/lib/ups-dash/wake-hold` lifts a hold by hand.

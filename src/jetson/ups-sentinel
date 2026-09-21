@@ -35,6 +35,17 @@ WAKE_INTERVAL     = 30.0
 POLL              = 5.0
 REPORT_EVERY      = 30.0
 
+# A human put the box down on purpose (dashboard Hibernate, or an emergency
+# shutdown). ups-dash writes and clears this file; the sentinel only reads it.
+# Not a tunable -- it is an instruction, not a threshold.
+WAKE_HOLD         = "/var/lib/ups-dash/wake-hold"
+HOLD_STALE_SEC    = 3600.0  # a hold this old with the box up has plainly ended
+# How long to keep waiting after the LAST magic packet before declaring the
+# wake failed. A resume from a multi-GB image took ~49s on 2026-09-21; with
+# short retry intervals the sentinel used to give up while it was still
+# resuming, and cried "needs manual attention" two seconds before it came up.
+RESUME_GRACE      = 120.0
+
 
 # ---- dashboard-editable tunables ------------------------------------------
 # Values above may be overridden from TUNABLES_FILE.  That file is ADVISORY:
@@ -118,6 +129,14 @@ def box_up():
                           stderr=subprocess.DEVNULL).returncode == 0
 
 
+def hold_age():
+    """Seconds since the wake hold was placed, or None if there is no hold."""
+    try:
+        return time.time() - os.stat(WAKE_HOLD).st_mtime
+    except Exception:
+        return None
+
+
 def send_wol():
     mac = bytes.fromhex(BOX_MAC.replace(":", ""))
     pkt = b"\xff" * 6 + mac * 16
@@ -137,6 +156,7 @@ def main():
     ol_since    = None      # when mains last became continuously present
     wake_tries  = 0
     next_wake   = 0.0
+    last_wol    = 0.0
     last_report = 0.0
     last_blind  = 0.0
 
@@ -157,8 +177,21 @@ def main():
 
         if on_batt:
             if state != "onbatt":
-                log("MAINS LOST (%s) - the box hibernates itself via the governor" % st)
-                state, outage_seen = "onbatt", True
+                # Arm the wake only for a box the OUTAGE actually took down.
+                # A box that was already off when mains failed -- hibernated
+                # by hand, say -- is not an outage casualty, and waking it
+                # afterwards overrules a human decision. That exact thing
+                # happened on 2026-09-21: hibernated at 19:05, woken at 21:06.
+                #
+                # `outage_seen or` matters: if an earlier outage already took
+                # the box down and mains merely flapped, the box is off NOW
+                # because of the outage. Re-deciding from box_up() alone would
+                # disarm the wake and it would never come back.
+                armed = outage_seen or box_up()
+                log("MAINS LOST (%s) - %s" % (st,
+                    "the box hibernates itself via the governor" if armed else
+                    "box was already off, so it will NOT be woken afterwards"))
+                state, outage_seen = "onbatt", armed
                 wake_tries, next_wake = 0, 0.0
             ol_since = None            # any dip restarts the stability window
             time.sleep(POLL)
@@ -173,6 +206,18 @@ def main():
         if box_up():
             if state != "online":
                 log("box is up and mains is back - standing down")
+            # Safety valve: ups-dash clears the hold when it sees the box come
+            # back, but if ups-dash were down at that moment a stale hold
+            # would block the NEXT genuine outage recovery. An hour of the box
+            # being up means the manual shutdown has plainly ended. (A hold
+            # placed seconds ago is left alone: hibernating takes a while.)
+            age = hold_age()
+            if age is not None and age > HOLD_STALE_SEC:
+                try:
+                    os.remove(WAKE_HOLD)
+                    log("stale wake hold cleared - the box has been up")
+                except Exception:
+                    pass
             state, outage_seen, wake_tries = "online", False, 0
             time.sleep(POLL)
             continue
@@ -181,6 +226,16 @@ def main():
         if not outage_seen:
             # It went down for a reason we did not cause (manual hibernate,
             # maintenance). Not ours to undo.
+            time.sleep(POLL)
+            continue
+
+        # Guard B: a human put it down DURING the outage. It was up when mains
+        # failed, so Guard A armed the wake -- but the outage does not get to
+        # overrule somebody deliberately switching the box off.
+        if hold_age() is not None:
+            if now - last_report >= REPORT_EVERY:
+                log("wake held: the box was put down by hand - not waking it")
+                last_report = now
             time.sleep(POLL)
             continue
 
@@ -203,10 +258,12 @@ def main():
                 log("gate passed (charge=%.0f%%, stable %.0fs) - sending WoL (%d/%d)"
                     % (charge, stable, wake_tries, WAKE_TRIES))
                 send_wol()
+                last_wol  = now
                 next_wake = now + WAKE_INTERVAL
-            else:
+            elif now - last_wol >= RESUME_GRACE:
                 log("WoL attempts exhausted - the box needs manual attention")
                 outage_seen = False
+            # else: packets are sent, the box may still be resuming -- wait.
 
         time.sleep(POLL)
 

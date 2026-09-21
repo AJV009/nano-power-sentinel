@@ -61,6 +61,8 @@ DB_PATH = _str("UPS_DASH_DB", "/var/lib/ups-dash/telemetry.db")
 NOTIFY_CONF = _str("UPS_DASH_NOTIFY", "/etc/ups-dash/notify.json")
 UPSCMD_CONF = _str("UPS_DASH_UPSCMD", "/etc/ups-dash/upscmd.json")
 TUNABLES_CONF = _str("UPS_DASH_TUNABLES", "/etc/ups-dash/tunables.json")
+# Persistent, not /run: a hold must survive the jetson rebooting mid-outage.
+WAKE_HOLD = _str("UPS_DASH_WAKE_HOLD", "/var/lib/ups-dash/wake-hold")
 
 
 def summary():

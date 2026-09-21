@@ -19,6 +19,7 @@ which is itself worth saying out loud rather than papering over.
 
 import time
 
+from . import hold
 from .states import (CAUSE_OUTAGE, CAUSE_UNKNOWN, CAUSE_EMERGENCY_SAFE,
                      CAUSE_EMERGENCY_INSTANT, CAUSE_MANUAL_HIBERNATE,
                      MANUAL_CAUSES)
@@ -84,11 +85,21 @@ class CauseTracker(object):
         awake = (box_state == "awake")
 
         if awake:
-            # Back up: forget everything, so the next disappearance is
-            # attributed on its own evidence rather than stale history.
+            came_back = (self._was_awake is False)
             self.cause = None
-            self.clear_intent()
             self._was_awake = True
+            # ⚠ The intent is NOT cleared on every awake tick. It is declared
+            # while the box is still up, and after a hibernate request the box
+            # keeps LOOKING up for a poll-grace window (up to 15 s) before the
+            # agent goes silent. The previous version cleared it here, so the
+            # intent was wiped before the box ever went down and a deliberate
+            # hibernate was reported as "Box unreachable". It is consumed on
+            # attribution below, or expires via INTENT_TTL.
+            if came_back:
+                # Genuinely returned from being down: the manual shutdown is
+                # over, so lift the hold that stops the sentinel waking it.
+                self.clear_intent()
+                hold.clear_hold()
             return None
 
         if box_state == "unknown":
@@ -111,12 +122,12 @@ class CauseTracker(object):
                 self.cause = CAUSE_UNKNOWN
             self.clear_intent()
 
-        # An outage that begins AFTER a manual shutdown does not retroactively
-        # turn it into an outage -- but a box that went down for an unknown
-        # reason and is now clearly on battery probably did go down to the
-        # outage, so allow that one upgrade.
-        if self.cause == CAUSE_UNKNOWN and on_battery is True:
-            self.cause = CAUSE_OUTAGE
+        # (Removed: an "unknown -> outage" upgrade once the UPS went on
+        # battery. Cause is attributed on the DOWN transition, so "unknown"
+        # already means the box went down while mains was fine; an outage
+        # starting later does not make it an outage casualty. That rule is
+        # what relabelled a 19:05 manual hibernate as "Box hibernated" when
+        # the power failed at 20:30.)
 
         self._was_awake = False
         return self.cause

@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import config as cfgmod
 from . import control
-from . import states, upsoff
+from . import hold, states, upsoff
 
 HEARTBEAT = 15.0
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -200,6 +200,8 @@ def make_handler(collector, store):
                 return self._json(409, {"error": refusal, "interlocked": True})
 
             if action == "wake":
+                # Waking it by hand ends the manual shutdown.
+                hold.clear_hold()
                 ok, detail = control.magic_packet()
                 store.add_event(time.time(), states.MANUAL_WAKE, collector.episodes.id,
                                 {"ok": ok, "detail": detail, "override": override})
@@ -212,6 +214,9 @@ def make_handler(collector, store):
                 # an unexplained failure rather than something you did.
                 collector.cause.declare_intent(
                     states.CAUSE_MANUAL_HIBERNATE, time.time())
+                # And tell the sentinel: you switched it off on purpose, so
+                # the next outage recovery must not switch it back on.
+                hold.set_hold("hibernated from the dashboard")
                 store.add_event(time.time(), states.MANUAL_HIBERNATE,
                                 collector.episodes.id, {"override": override})
                 ok, detail = control.box_hibernate(collector.box.base)

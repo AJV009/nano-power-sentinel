@@ -66,6 +66,7 @@ grab $BOX $BOXPW /etc/systemd/system/nut-monitor.service.d/resilience.conf      
 grab $BOX $BOXPW /etc/polkit-1/rules.d/49-box-agent-hibernate.rules box/polkit/49-box-agent-hibernate.rules
 grab $BOX $BOXPW /etc/nut/upsmon.conf                      box/nut/upsmon.conf
 grab $BOX $BOXPW /etc/nut/upssched.conf                    box/nut/upssched.conf
+grab $BOX $BOXPW /etc/nut/upssched-cmd                     box/nut/upssched-cmd
 grab $BOX $BOXPW /etc/kernel/cmdline                       box/kernel/cmdline
 grab $BOX $BOXPW /etc/dracut.conf.d/resume.conf            box/kernel/dracut-resume.conf
 grab $BOX $BOXPW /etc/ups-dash/tunables.json               box/ups-dash/tunables.json
