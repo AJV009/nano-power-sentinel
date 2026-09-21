@@ -1,0 +1,7 @@
+RUN_AS_USER nut
+MONITOR apc@localhost 0 monmaster <secret> master
+MINSUPPLIES 0
+SHUTDOWNCMD "/bin/true"
+POLLFREQ 5
+POLLFREQALERT 5
+DEADTIME 15

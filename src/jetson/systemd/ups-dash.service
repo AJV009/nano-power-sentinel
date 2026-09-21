@@ -1,0 +1,26 @@
+[Unit]
+Description=UPS dashboard - telemetry collector and web server
+Documentation=file://https://github.com/ajv009/nano-power-sentinel/DASHBOARD.md
+After=network-online.target nut-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jetson
+Group=jetson
+WorkingDirectory=/home/jetson/projects/ups-dash
+ExecStart=/usr/bin/python3 /home/jetson/projects/ups-dash/run.py
+Environment=UPS_DASH_DB=/var/lib/ups-dash/telemetry.db
+Environment=UPS_DASH_BOX=http://10.0.0.20:9009
+Environment=UPS_DASH_PORT=8088
+Restart=always
+RestartSec=5
+
+# ups-sentinel is the safety-critical process on this 2-core 921 MHz box.
+# The dashboard must never compete with it for CPU.
+Nice=10
+CPUWeight=20
+IOWeight=20
+
+[Install]
+WantedBy=multi-user.target

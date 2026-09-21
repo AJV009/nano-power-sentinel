@@ -1,0 +1,12 @@
+#!/bin/bash
+# Windows rewrites UEFI BootOrder to put itself first on every boot / update.
+# Re-assert Linux first. Resolve by LABEL - Boot#### numbers change if entries
+# are recreated.
+lin=$(efibootmgr | awk '/Linux Boot Manager/{print substr($1,5,4); exit}')
+win=$(efibootmgr | awk '/Windows Boot Manager/{print substr($1,5,4); exit}')
+[ -n "$lin" ] || { logger -t assert-boot-order "no Linux Boot Manager entry; leaving BootOrder alone"; exit 0; }
+if [ -n "$win" ]; then order="$lin,$win"; else order="$lin"; fi
+cur=$(efibootmgr | awk -F': *' '/^BootOrder:/{print $2}')
+if [ "$cur" != "$order" ]; then
+    efibootmgr -o "$order" >/dev/null && logger -t assert-boot-order "BootOrder $cur -> $order"
+fi

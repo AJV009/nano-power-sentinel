@@ -1,0 +1,35 @@
+# ntfy for the Power Sentinel dashboard, running ON THE NANO.
+#
+# WHY HERE and not an external host: during a power cut the nano and the router
+# both stay up on their own UPS, but the ISP modem does not. A locally hosted
+# ntfy still reaches a phone on the house WiFi when the internet is gone --
+# which is exactly the moment the alert matters most. An externally hosted one
+# cannot be reached at all then, because nothing can leave the house.
+#
+# Tradeoff accepted deliberately: if the nano dies, notifications die with it,
+# and silence looks identical to "everything is fine". No heartbeat watcher,
+# by choice.
+#
+# base-url is the PUBLIC cloudflared hostname, not the tailscale one, because
+# the phone is not always on the tailnet. The dashboard stays tailnet-only;
+# only ntfy is published.
+
+base-url: "https://ntfy.example.com"
+listen-http: "127.0.0.1:8090"
+
+cache-file: "/var/cache/ntfy/cache.db"
+cache-duration: "720h"
+auth-file: "/var/lib/ntfy/user.db"
+
+# Publicly reachable, so nothing is permitted unless explicitly granted.
+# An obscure topic name is not access control.
+auth-default-access: "deny-all"
+enable-signup: false
+enable-login: true
+
+# Terminated by cloudflared, which sets X-Forwarded-For.
+behind-proxy: true
+
+# No attachments: this only ever carries short power-event messages, and the
+# SD card is the weakest component in the system.
+attachment-cache-dir: ""

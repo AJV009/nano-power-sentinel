@@ -1,0 +1,13 @@
+[monmaster]
+    password = <secret>
+    upsmon master
+
+[boxmon]
+    password = <secret>
+    upsmon slave
+
+[killer]
+    password = <secret>
+    instcmds = load.off.delay
+    instcmds = load.off
+    instcmds = shutdown.stop

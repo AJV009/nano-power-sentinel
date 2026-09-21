@@ -1,0 +1,14 @@
+[Unit]
+Description=UPS sentinel - gated recovery controller for the W7900 box
+After=network-online.target nut-server.service
+Wants=nut-server.service
+
+[Service]
+Type=simple
+Environment=SENTINEL_ARMED=0
+ExecStart=/usr/local/sbin/ups-sentinel
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+# Publishes ONLY ntfy. The dashboard stays tailnet-only and is deliberately
+# not exposed here -- the phone is not always on the tailnet, but the dashboard
+# does not need to be public.
+tunnel: <UUID>
+credentials-file: /home/jetson/.cloudflared/<UUID>.json
+
+ingress:
+  - hostname: ntfy.example.com
+    service: http://127.0.0.1:8090
+  - service: http_status:404

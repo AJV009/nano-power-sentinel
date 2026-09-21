@@ -1,0 +1,31 @@
+# Site configuration -- real hostnames, IPs, MAC. Never commit.
+.env
+
+# Pulled copies of live machine state. These are mirrors of a specific
+# deployment, and although pull-state.sh scrubs credentials to <secret>,
+# they still carry that site's hostnames, UUIDs and serials.
+mirror/
+
+# Local scratch
+*.pyc
+__pycache__/
+*.db
+*.db-wal
+*.db-shm
+*.tmp
+*.bak
+*.orig
+*.pre-*
+.DS_Store
+
+# Anything that even looks like a credential
+*secret*
+*password*
+*token*
+*.key
+*.pem
+
+# Everything that must never be published: the sanitisation map (real
+# hostnames, MACs, UUIDs) and personal machine inventories. Keeping them in
+# one directory means one rule can never be half-applied.
+private/

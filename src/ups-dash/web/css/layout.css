@@ -1,0 +1,102 @@
+/* App shell.  Mobile-first; desktop is the same components, widened. */
+
+* { box-sizing: border-box; border-radius: 0 !important; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+#app {
+  padding: 0 var(--gutter);
+  padding-bottom: calc(var(--nav-h) + env(safe-area-inset-bottom, 0px) + 24px);
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+/* ---- top bar ---- */
+.topbar {
+  display: flex; align-items: center; gap: 10px;
+  height: 52px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 18px;
+  position: sticky; top: 0; z-index: 20;
+  background: var(--bg);
+}
+.topbar .dot {
+  width: 8px; height: 8px; background: var(--state);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--state) 20%, transparent);
+  flex: 0 0 auto;
+}
+.topbar h1 {
+  font-size: 13px; font-weight: 600; margin: 0;
+  letter-spacing: .14em; text-transform: uppercase;
+}
+.topbar .spacer { flex: 1; }
+.topbar button {
+  background: none; border: 1px solid var(--line); color: var(--dim);
+  font-family: var(--mono); font-size: 11px; padding: 5px 9px;
+  cursor: pointer; letter-spacing: .08em;
+  min-height: 32px;
+}
+.topbar button:hover { color: var(--text); border-color: var(--dim); }
+
+/* ---- bottom nav ---- */
+nav.tabs {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+nav.tabs button {
+  appearance: none; background: none; border: 0;
+  color: var(--dimmer); font-family: var(--mono); font-size: 10px;
+  letter-spacing: .12em; text-transform: uppercase;
+  height: var(--nav-h); cursor: pointer;
+  border-top: 2px solid transparent;
+  display: flex; align-items: center; justify-content: center;
+}
+nav.tabs button[aria-selected="true"] {
+  color: var(--state); border-top-color: var(--state);
+}
+
+/* ---- generic blocks ---- */
+section.panel { margin-bottom: 22px; }
+.panel > h2 {
+  font-size: 10px; font-weight: 600; color: var(--dim);
+  letter-spacing: .18em; text-transform: uppercase;
+  margin: 0 0 10px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  padding: 14px;
+}
+.muted { color: var(--dim); }
+.mono  { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.hidden { display: none !important; }
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+.grid4 { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--gap); }
+
+@media (min-width: 720px) {
+  #app { padding-bottom: 32px; }
+  body { font-size: 16px; }
+  .grid4 { grid-template-columns: repeat(4, 1fr); }
+  nav.tabs {
+    position: sticky; top: 52px; bottom: auto;
+    border-top: 0; border-bottom: 1px solid var(--line);
+    max-width: 1100px; margin: -18px auto 20px;
+    background: var(--bg);
+    grid-template-columns: repeat(4, max-content);
+  }
+  nav.tabs button { height: 42px; padding: 0 22px; justify-content: flex-start; }
+}

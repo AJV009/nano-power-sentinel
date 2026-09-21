@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Collect the privileged half of the box's health into a readable file.
+
+WHY THIS EXISTS: the most valuable signals here need root -- ethtool's WoL
+flag, NVMe SMART counters, the UEFI boot order. box-agent is deliberately
+unprivileged (NoNewPrivileges=yes), so rather than grant it capabilities, a
+root timer writes the answers to /run and the agent just reads them.
+
+Everything here answers a question that otherwise only surfaces during an
+outage, when it is too late:
+
+  wol            is the box still wakeable? r8169 drops the flag on reboot,
+                 and if wol-arm ever fails, recovery is dead and silent.
+  unsafe_shutdowns  how many times the box lost power WITHOUT a clean
+                 shutdown. This is the scoreboard for whether the whole UPS
+                 strategy is actually working.
+  boot_order     Windows rewrites UEFI BootOrder on every boot; if Linux is
+                 not first, an unattended recovery boots the wrong OS.
+"""
+
+import json
+import os
+import re
+import subprocess
+import tempfile
+import time
+
+OUT = "/run/box-agent/health.json"
+NIC = "eth0"
+UNITS = ["hibernate-governor", "wol-arm", "nut-monitor",
+         "assert-boot-order", "box-agent", "wol-recheck.timer"]
+
+
+def run(cmd, timeout=10):
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=timeout)
+        return p.stdout.decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def wol():
+    out = run(["ethtool", NIC])
+    m = re.search(r"^\s*Wake-on:\s*(\S+)", out, re.M)
+    flag = m.group(1) if m else None
+    acpi = run(["cat", "/proc/acpi/wakeup"])
+    ln = re.search(r"^(LN00)\s+\S+\s+\*?(\w+)", acpi, re.M)
+    return {
+        # "g" means magic-packet wake is armed. Anything else (usually "d")
+        # means the box CANNOT be woken over the network.
+        "ethtool": flag,
+        "armed": flag is not None and "g" in flag,
+        "acpi_ln00": ln.group(2) if ln else None,
+        "pci_wakeup": (open("/sys/class/net/%s/device/power/wakeup" % NIC).read().strip()
+                       if os.path.exists("/sys/class/net/%s/device/power/wakeup" % NIC)
+                       else None),
+        "carrier": _read("/sys/class/net/%s/carrier" % NIC),
+        "speed": _read("/sys/class/net/%s/speed" % NIC),
+    }
+
+
+def _read(path):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except Exception:
+        return None
+
+
+def nvme():
+    out = run(["smartctl", "-A", "-j", "/dev/nvme0"])
+    try:
+        data = json.loads(out)
+    except Exception:
+        return {"available": False}
+    log = data.get("nvme_smart_health_information_log") or {}
+    return {
+        "available": True,
+        # The count that matters: every increment is a power loss the box did
+        # not shut down cleanly through.
+        "unsafe_shutdowns": log.get("unsafe_shutdowns"),
+        "power_cycles": log.get("power_cycles"),
+        "power_on_hours": log.get("power_on_hours"),
+        "percentage_used": log.get("percentage_used"),
+        "media_errors": log.get("media_errors"),
+        "temperature_c": log.get("temperature"),
+    }
+
+
+def boot_order():
+    out = run(["efibootmgr"])
+    order = re.search(r"^BootOrder:\s*(\S+)", out, re.M)
+    current = re.search(r"^BootCurrent:\s*(\S+)", out, re.M)
+    entries = dict(re.findall(r"^Boot([0-9A-Fa-f]{4})\*?\s+(.+?)\s*$", out, re.M))
+    ids = order.group(1).split(",") if order else []
+    first = entries.get(ids[0]) if ids else None
+    return {
+        "order": ids,
+        "current": current.group(1) if current else None,
+        "first_label": first,
+        # Windows rewrites BootOrder on every boot; assert-boot-order fixes it.
+        "linux_first": bool(first and "linux" in first.lower()),
+        "entries": {k: v[:60] for k, v in entries.items()},
+    }
+
+
+def units():
+    """Record Type and Result alongside ActiveState.
+
+    "inactive" does NOT mean broken for a Type=oneshot unit: it ran at boot,
+    succeeded and exited, which is exactly correct. Judging health on
+    is-active alone reports a permanent false failure for assert-boot-order,
+    and a dashboard that cries wolf is worse than no dashboard."""
+    out = {}
+    for u in UNITS:
+        name = u if "." in u else u + ".service"
+        props = run(["systemctl", "show", name,
+                     "-p", "ActiveState", "-p", "Type", "-p", "Result",
+                     "-p", "UnitFileState"])
+        kv = {}
+        for line in props.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                kv[k] = v
+        state = kv.get("ActiveState", "unknown")
+        typ = kv.get("Type", "")
+        result = kv.get("Result", "")
+        out[name] = {
+            "active": state,
+            "type": typ,
+            "result": result,
+            "enabled": kv.get("UnitFileState", "unknown"),
+            "healthy": state in ("active", "activating")
+                       or (typ == "oneshot" and result == "success"),
+        }
+    return out
+
+
+def main():
+    payload = {"ts": time.time(), "wol": wol(), "nvme": nvme(),
+               "boot": boot_order(), "units": units()}
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(OUT))
+    with os.fdopen(fd, "w") as fh:
+        json.dump(payload, fh, indent=1)
+    os.chmod(tmp, 0o644)      # box-agent reads this unprivileged
+    os.replace(tmp, OUT)      # atomic; a reader must never see a partial file
+
+
+if __name__ == "__main__":
+    main()

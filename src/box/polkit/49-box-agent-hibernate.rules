@@ -1,0 +1,19 @@
+/* Allow the box-agent service user to hibernate this machine.
+ *
+ * Authorised by the machine's owner on 2026-09-20 for the UPS dashboard's
+ * manual hibernate button. See jetson-ups-w7900-control/DASHBOARD.md §10.
+ *
+ * Why polkit and not sudo: box-agent runs with NoNewPrivileges=yes, which
+ * disables setuid outright, so sudo cannot function in that unit at all.
+ * `systemctl hibernate` calls logind over D-Bus, which polkit governs, so no
+ * setuid is involved and the unit's hardening stays intact.
+ *
+ * Scope: exactly one action, exactly one user. Nothing else is granted.
+ * Remove this file to revoke.
+ */
+polkit.addRule(function (action, subject) {
+    if (action.id === "org.freedesktop.login1.hibernate" &&
+        subject.user === "youruser") {
+        return polkit.Result.YES;
+    }
+});

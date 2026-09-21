@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""
+UPS sentinel - recovery controller for the W7900 box.
+
+The jetson holds the APC's USB and runs on a DIFFERENT UPS, so it stays alive
+through an outage and is the sole authority on when the box may come back.
+
+  on battery  -> the box hibernates itself (hibernate-governor, on the box)
+  mains back  -> WAIT until the pack has recharged past WAKE_CHARGE_PCT *and*
+                 mains has been stable for MAINS_STABLE_SEC, then send WoL
+
+Why the gate: if mains is flapping, waking the box immediately would burn a
+hibernate/resume cycle on a pack that never recharges, and eventually there
+would not be enough battery left to finish writing an image - a hard power
+loss mid-hibernate. Waiting for 50% both proves mains is genuinely back and
+guarantees the next outage can be survived.
+
+KILLPOWER IS DELIBERATELY ABSENT. Verified 2026-09-20: this UPS latches its
+output off after load.off.delay and reports "OL OFF" on mains return, waiting
+for a human to press its front-panel button. There is no load.on command.
+Cutting the load would strand the box with no +5VSB, so WoL could not rescue
+it either. Do not re-add it.
+"""
+import os, socket, subprocess, time
+
+UPS               = "apc@localhost"
+BOX_IP            = "10.0.0.20"
+BOX_MAC           = "aa:bb:cc:dd:ee:ff"
+BROADCAST         = "10.0.0.255"
+
+WAKE_CHARGE_PCT   = 50.0    # pack must be at least this full before waking the box
+MAINS_STABLE_SEC  = 120.0   # ...and mains must have held this long, uninterrupted
+WAKE_TRIES        = 5
+WAKE_INTERVAL     = 30.0
+POLL              = 5.0
+REPORT_EVERY      = 30.0
+
+
+# ---- dashboard-editable tunables ------------------------------------------
+# Values above may be overridden from TUNABLES_FILE.  That file is ADVISORY:
+# anything missing, malformed, mistyped or out of range leaves the compiled-in
+# default untouched, and a bad file can NEVER stop this process from starting.
+# That single property is what makes it safe to let a web page write here.
+TUNABLES_FILE = "/etc/ups-dash/tunables.json"
+TUNABLE_SPEC = {
+    "wake_charge_pct":   ("WAKE_CHARGE_PCT",  20.0, 100.0),
+    "mains_stable_sec":  ("MAINS_STABLE_SEC", 30.0, 1800.0),
+    "wake_tries":        ("WAKE_TRIES",        1.0,  20.0),
+    "wake_interval_sec": ("WAKE_INTERVAL",     5.0, 300.0),
+}
+_TUN_MTIME = [None]
+
+
+def load_tunables(initial=False):
+    """Never raises.  Re-reads only when the file's mtime has moved."""
+    try:
+        mtime = os.stat(TUNABLES_FILE).st_mtime
+    except Exception:
+        return                      # no file is a perfectly normal state
+    if not initial and mtime == _TUN_MTIME[0]:
+        return
+    _TUN_MTIME[0] = mtime
+    try:
+        import json
+        with open(TUNABLES_FILE) as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError("top level is not an object")
+    except Exception as exc:
+        log("tunables file rejected (%s) - keeping current values" % exc)
+        return
+    g, changed = globals(), []
+    for key, (name, lo, hi) in TUNABLE_SPEC.items():
+        if key not in data:
+            continue
+        try:
+            val = float(data[key])
+        except Exception:
+            log("tunable %s: not a number - ignored" % key)
+            continue
+        if not (lo <= val <= hi):
+            log("tunable %s=%s outside %g..%g - ignored" % (key, val, lo, hi))
+            continue
+        if g[name] != val:
+            changed.append("%s %g -> %g" % (key, g[name], val))
+            g[name] = val
+    if changed:
+        log("tunables reloaded: " + "; ".join(changed))
+
+
+def log(m):
+    print("[ups-sentinel] " + m, flush=True)
+
+
+def _upsc(var):
+    try:
+        r = subprocess.run(["upsc", UPS, var], capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def ups_status():
+    return _upsc("ups.status")
+
+
+def ups_charge():
+    v = _upsc("battery.charge")
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def box_up():
+    return subprocess.run(["ping", "-c1", "-W2", BOX_IP],
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
+def send_wol():
+    mac = bytes.fromhex(BOX_MAC.replace(":", ""))
+    pkt = b"\xff" * 6 + mac * 16
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    for port in (9, 7):
+        s.sendto(pkt, (BROADCAST, port))
+    s.close()
+
+
+def main():
+    load_tunables(initial=True)
+    log("started: wake gate = charge >= %.0f%% AND mains stable %.0fs | target %s / %s"
+        % (WAKE_CHARGE_PCT, MAINS_STABLE_SEC, BOX_IP, BOX_MAC))
+    state       = "online"
+    outage_seen = False     # only wake a box that went down because of an outage
+    ol_since    = None      # when mains last became continuously present
+    wake_tries  = 0
+    next_wake   = 0.0
+    last_report = 0.0
+    last_blind  = 0.0
+
+    while True:
+        now = time.time()
+        load_tunables()
+        st  = ups_status()
+
+        if st is None:
+            # Absence of data is NOT evidence that mains returned. Hold state.
+            if now - last_blind >= 60:
+                log("cannot read the UPS - holding state (this is not 'mains back')")
+                last_blind = now
+            time.sleep(POLL)
+            continue
+
+        on_batt = "OB" in st.split()
+
+        if on_batt:
+            if state != "onbatt":
+                log("MAINS LOST (%s) - the box hibernates itself via the governor" % st)
+                state, outage_seen = "onbatt", True
+                wake_tries, next_wake = 0, 0.0
+            ol_since = None            # any dip restarts the stability window
+            time.sleep(POLL)
+            continue
+
+        # ---------- mains is present ----------
+        if ol_since is None:
+            ol_since = now
+            if state == "onbatt":
+                log("mains restored (%s) - stability window starts now" % st)
+
+        if box_up():
+            if state != "online":
+                log("box is up and mains is back - standing down")
+            state, outage_seen, wake_tries = "online", False, 0
+            time.sleep(POLL)
+            continue
+
+        # box is dark while mains is present
+        if not outage_seen:
+            # It went down for a reason we did not cause (manual hibernate,
+            # maintenance). Not ours to undo.
+            time.sleep(POLL)
+            continue
+
+        state   = "recovering"
+        charge  = ups_charge()
+        stable  = now - ol_since
+        c_ok    = charge is not None and charge >= WAKE_CHARGE_PCT
+        s_ok    = stable >= MAINS_STABLE_SEC
+
+        if now - last_report >= REPORT_EVERY:
+            log("holding wake: charge=%s%% (need %.0f) | mains stable %.0fs (need %.0f)%s"
+                % ("?" if charge is None else "%.0f" % charge, WAKE_CHARGE_PCT,
+                   stable, MAINS_STABLE_SEC,
+                   "  -> GATE OPEN" if (c_ok and s_ok) else ""))
+            last_report = now
+
+        if c_ok and s_ok and now >= next_wake:
+            if wake_tries < WAKE_TRIES:
+                wake_tries += 1
+                log("gate passed (charge=%.0f%%, stable %.0fs) - sending WoL (%d/%d)"
+                    % (charge, stable, wake_tries, WAKE_TRIES))
+                send_wol()
+                next_wake = now + WAKE_INTERVAL
+            else:
+                log("WoL attempts exhausted - the box needs manual attention")
+                outage_seen = False
+
+        time.sleep(POLL)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

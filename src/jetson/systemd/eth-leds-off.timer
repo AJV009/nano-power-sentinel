@@ -1,0 +1,12 @@
+[Unit]
+Description=Re-assert Ethernet LEDs off
+
+[Timer]
+# LEDSEL is a config register and survives link changes, but a driver
+# reinitialisation would restore the stock value. Cheap to re-assert.
+OnBootSec=2min
+OnUnitActiveSec=30min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,67 @@
+#!/bin/sh
+# Turn the Jetson Nano's Ethernet LEDs off (they are painfully bright at night)
+# WITHOUT touching the link itself.
+#
+# HARDWARE: the Nano dev kit's Ethernet is a PCIe Realtek RTL8111/8168
+# (01:00.0, driver r8168) -- NOT the RTL8211F PHY that most Jetson LED advice
+# online refers to, so the usual MDIO "page 0xd04" recipe does not apply here.
+# The LED configuration lives in the controller's own register map.
+#
+# BAR2 is the register map, confirmed by reading the MAC back from offset 0:
+#   0x13004000 -> 0xE64B0400  == 00:04:4b:e6 little-endian.  BAR4 reads zero.
+#
+# LEDSEL is the 16-bit register at offset 0x18:
+#   bits [15:12] LED feature control
+#   bits [11:08] select for PINLED2
+#   bits [07:04] select for PINLED1
+#   bits [03:00] select for PINLED0
+# Stock value here is 0x0084 -> LED0=4, LED1=8 driven. Zeroing the selects
+# leaves no event driving either pin, so both go dark.
+#
+# Config registers sit behind the 9346CR lock at offset 0x50: write 0xC0 to
+# enable config writes, then restore the original byte afterwards.
+#
+# ⚠ ACCESS MUST BE NATURALLY ALIGNED. Byte-wise access to this region from
+# userspace (e.g. Python mmap slicing) raises SIGBUS on ARM. busybox devmem
+# does properly aligned word access, which is why it is used here.
+#
+# Usage: eth-leds off | on | status
+
+REGS=0x13004000
+LEDSEL=0x13004018
+LOCK=0x13004050
+STOCK=0x0084          # value observed on this board at first boot
+KEEP=/run/eth-leds.original
+
+dm() { busybox devmem "$@"; }
+
+read_led()  { dm $LEDSEL 16; }
+read_lock() { dm $LOCK 8; }
+
+write_led() {
+    orig_lock=$(read_lock)
+    dm $LOCK 8 0xC0            # unlock config registers
+    dm $LEDSEL 16 "$1"
+    dm $LOCK 8 "$orig_lock"    # restore the lock byte exactly as found
+}
+
+case "$1" in
+  status)
+    echo "LEDSEL=$(read_led)  lock=$(read_lock)"
+    ;;
+  off)
+    [ -f "$KEEP" ] || read_led > "$KEEP"
+    write_led 0x0000
+    echo "LEDs off (LEDSEL=$(read_led), original $(cat $KEEP) saved)"
+    ;;
+  on)
+    want=$STOCK
+    [ -f "$KEEP" ] && want=$(cat "$KEEP")
+    write_led "$want"
+    echo "LEDs restored (LEDSEL=$(read_led))"
+    ;;
+  *)
+    echo "usage: $0 off|on|status" >&2
+    exit 2
+    ;;
+esac

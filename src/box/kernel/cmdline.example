@@ -1,0 +1,1 @@
+nvme_load=YES nowatchdog rw root=UUID=<ROOT-UUID> resume=UUID=<ROOT-UUID> resume_offset=<RESUME-OFFSET>

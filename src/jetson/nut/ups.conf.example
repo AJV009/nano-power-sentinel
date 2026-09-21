@@ -1,0 +1,5 @@
+[apc]
+    driver = usbhid-ups
+    port = auto
+    pollinterval = 2
+    desc = "APC Back-UPS Pro BR1500G-IN"

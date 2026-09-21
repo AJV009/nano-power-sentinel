@@ -1,0 +1,14 @@
+[Unit]
+Description=Arm Wake-on-LAN on eth0
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/ethtool -s eth0 wol g
+ExecStart=/bin/sh -c 'echo enabled > /sys/class/net/eth0/device/power/wakeup'
+ExecStart=/bin/sh -c 'grep -q "^LN00.*disabled" /proc/acpi/wakeup && echo LN00 > /proc/acpi/wakeup; true'
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+[Unit]
+Description=Box telemetry agent for the UPS dashboard
+Documentation=file://https://github.com/ajv009/nano-power-sentinel/DASHBOARD.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/youruser/projects/box-agent/run.py
+Restart=always
+RestartSec=5
+User=youruser
+# Read-only observer. It must never compete with the hibernate governor,
+# which is the safety-critical process on this machine.
+Nice=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+# ProtectSystem=full makes /etc read-only, which would block the agent from
+# writing its own tunables file. Punch exactly one hole, no wider.
+ReadWritePaths=/etc/ups-dash
+
+[Install]
+WantedBy=multi-user.target

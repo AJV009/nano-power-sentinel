@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Give ups-dash the credentials it needs to command the UPS.
+
+WHY THIS IS NEEDED: ups-dash runs unprivileged as `jetson`, but
+/etc/nut/killer.secret is 0600 root:root and unreadable by it. This copies the
+same `killer` credentials into /etc/ups-dash/upscmd.json with mode 640 owned by
+the service user, which is the minimum that lets the emergency shutdown work.
+
+WHAT IT ENABLES: the dashboard's "Safe shutdown" and "Instant cut" buttons,
+which de-energise the UPS output.
+
+⚠ THAT ACTION IS NOT REVERSIBLE FROM SOFTWARE. This UPS has no `load.on` and no
+`shutdown.return`; after a cut it latches at `OL OFF` even once mains returns
+and waits for somebody to press its front-panel button. With the output dead
+the box has no +5VSB, so Wake-on-LAN cannot bring it back either.
+
+TO UNDO: sudo rm /etc/ups-dash/upscmd.json && sudo systemctl restart ups-dash
+Both shutdown modes then fail closed again, and nothing else is affected.
+
+Run with: sudo /usr/local/sbin/setup-upscmd-creds
+"""
+
+import grp
+import json
+import os
+import pwd
+import subprocess
+import sys
+
+SECRET = "/etc/nut/killer.secret"
+TARGET = "/etc/ups-dash/upscmd.json"
+OWNER = "jetson"
+SERVICE = "ups-dash"
+
+
+def fail(msg):
+    print("ERROR: %s" % msg)
+    sys.exit(1)
+
+
+def main():
+    if os.geteuid() != 0:
+        fail("must run as root (use sudo)")
+
+    if not os.path.exists(SECRET):
+        fail("%s not found -- is NUT configured on this machine?" % SECRET)
+
+    raw = open(SECRET).read().strip()
+    if not raw:
+        fail("%s is empty" % SECRET)
+
+    # The file may hold just the password, or "user:password".
+    user, password = ("killer", raw)
+    if ":" in raw:
+        user, password = raw.split(":", 1)
+
+    os.makedirs(os.path.dirname(TARGET), exist_ok=True)
+    with open(TARGET, "w") as fh:
+        json.dump({"user": user, "password": password}, fh, indent=2)
+        fh.write("\n")
+
+    # 640 owned by the service user: readable by ups-dash, by nobody else.
+    os.chmod(TARGET, 0o640)
+    try:
+        os.chown(TARGET,
+                 pwd.getpwnam(OWNER).pw_uid,
+                 grp.getgrnam(OWNER).gr_gid)
+    except KeyError:
+        fail("user/group %r does not exist" % OWNER)
+
+    print("wrote %s  (user=%r, password=%d chars, mode 640 %s:%s)"
+          % (TARGET, user, len(password), OWNER, OWNER))
+
+    subprocess.run(["systemctl", "restart", SERVICE], check=False)
+    print("restarted %s" % SERVICE)
+
+    # Prove it worked rather than assuming: ask the dashboard itself.
+    try:
+        import time
+        import urllib.request
+        time.sleep(8)
+        req = urllib.request.Request(
+            "http://127.0.0.1:8088/api/control/ups-off",
+            data=json.dumps({"mode": "safe"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=8)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")
+            if "confirmed flag not set" in body:
+                # Reached the confirmation check, which means it got PAST the
+                # credentials check. Exactly what we want to see, and it cut
+                # nothing because the confirmed flag was deliberately omitted.
+                print("verified: credentials accepted "
+                      "(request correctly refused for lack of confirmation)")
+            elif "credentials" in body:
+                print("PROBLEM: dashboard still reports missing credentials:")
+                print("  %s" % body[:200])
+            else:
+                print("unexpected response: %s" % body[:200])
+    except Exception as exc:
+        print("could not self-verify (%s) -- check the dashboard by hand" % exc)
+
+
+if __name__ == "__main__":
+    main()

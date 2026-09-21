@@ -1,0 +1,10 @@
+CMDSCRIPT /etc/nut/upssched-cmd
+PIPEFN    /run/nut/upssched.pipe
+LOCKFN    /run/nut/upssched.lock
+
+# The 60s fixed timer is gone - hibernate-governor.service now decides when,
+# based on UPS runtime vs this machine's hibernate cost.
+# LOWBATT remains as the backstop if the governor is dead.
+AT ONBATT  * EXECUTE on-battery
+AT ONLINE  * EXECUTE on-line
+AT LOWBATT * EXECUTE hibernate-now

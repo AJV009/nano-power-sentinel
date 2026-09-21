@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""
+hibernate-governor - adaptive hibernate timing for the W7900 box.
+
+Replaces "hibernate 60 s after going on battery" with a decision based on how
+long the UPS says it can actually last, and how long *this* machine will take to
+write its hibernate image.
+
+    runtime_to_reserve = battery.runtime * (charge - RESERVE) / charge
+    hibernate when   runtime_to_reserve <= hibernate_cost + SAFETY
+
+hibernate_cost is derived from live RAM in use, so a loaded box hibernates
+EARLIER than an idle one: a bigger image needs a bigger reserve to finish.
+
+Talks the NUT protocol directly to upsd over one persistent TCP connection -
+polling `upsc` as a subprocess every second would spawn ~86k processes a day.
+"""
+import os, socket, subprocess, time
+
+UPS_HOST, UPS_PORT, UPS_NAME = "10.0.0.10", 3493, "apc"
+
+RESERVE_PCT       = 30.0   # % charge that must remain AFTER hibernation completes
+SAFETY_SEC        = 30.0
+WRITE_RATE_GBPS   = 0.5    # conservative; measured 0.72 GB/s on 2026-09-20
+FIXED_OVERHEAD    = 15.0   # freeze/snapshot/power-off overhead
+SETTLE_SEC        = 30.0   # ignore the post-transfer gauge transient
+DEBOUNCE          = 3      # consecutive triggering samples required
+POLL              = 1.0
+COMMS_LOSS_LIMIT  = 45.0   # on battery + blind this long -> hibernate anyway
+REPORT_EVERY      = 15.0
+
+
+# ---- dashboard-editable tunables ------------------------------------------
+# Values above may be overridden from TUNABLES_FILE.  That file is ADVISORY:
+# anything missing, malformed, mistyped or out of range leaves the compiled-in
+# default untouched, and a bad file can NEVER stop this process from starting.
+# That single property is what makes it safe to let a web page write here.
+TUNABLES_FILE = "/etc/ups-dash/tunables.json"
+TUNABLE_SPEC = {
+    "reserve_pct":          ("RESERVE_PCT",      10.0,  80.0),
+    "safety_sec":           ("SAFETY_SEC",        0.0, 300.0),
+    "write_rate_gbps":      ("WRITE_RATE_GBPS",   0.1,   5.0),
+    "fixed_overhead_sec":   ("FIXED_OVERHEAD",    0.0, 120.0),
+    "comms_loss_limit_sec": ("COMMS_LOSS_LIMIT", 15.0, 600.0),
+}
+_TUN_MTIME = [None]
+
+
+def load_tunables(initial=False):
+    """Never raises.  Re-reads only when the file's mtime has moved."""
+    try:
+        mtime = os.stat(TUNABLES_FILE).st_mtime
+    except Exception:
+        return                      # no file is a perfectly normal state
+    if not initial and mtime == _TUN_MTIME[0]:
+        return
+    _TUN_MTIME[0] = mtime
+    try:
+        import json
+        with open(TUNABLES_FILE) as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError("top level is not an object")
+    except Exception as exc:
+        log("tunables file rejected (%s) - keeping current values" % exc)
+        return
+    g, changed = globals(), []
+    for key, (name, lo, hi) in TUNABLE_SPEC.items():
+        if key not in data:
+            continue
+        try:
+            val = float(data[key])
+        except Exception:
+            log("tunable %s: not a number - ignored" % key)
+            continue
+        if not (lo <= val <= hi):
+            log("tunable %s=%s outside %g..%g - ignored" % (key, val, lo, hi))
+            continue
+        if g[name] != val:
+            changed.append("%s %g -> %g" % (key, g[name], val))
+            g[name] = val
+    if changed:
+        log("tunables reloaded: " + "; ".join(changed))
+
+
+def log(m):
+    print("[hibernate-governor] " + m, flush=True)
+
+
+class Upsd:
+    def __init__(self, host, port):
+        self.host, self.port, self.sock, self.f = host, port, None, None
+
+    def close(self):
+        for x in (self.f, self.sock):
+            try:
+                if x: x.close()
+            except Exception:
+                pass
+        self.sock = self.f = None
+
+    def connect(self):
+        self.close()
+        s = socket.create_connection((self.host, self.port), timeout=5)
+        s.settimeout(5)
+        self.sock, self.f = s, s.makefile("rw", encoding="utf-8", newline="\n")
+
+    def list_vars(self, ups):
+        if self.sock is None:
+            self.connect()
+        self.f.write("LIST VAR %s\n" % ups)
+        self.f.flush()
+        out = {}
+        while True:
+            line = self.f.readline()
+            if not line:
+                raise IOError("upsd closed the connection")
+            line = line.strip()
+            if line.startswith("END LIST"):
+                return out
+            if line.startswith("ERR"):
+                raise IOError(line)
+            if line.startswith("VAR "):
+                p = line.split(" ", 3)
+                if len(p) == 4:
+                    out[p[2]] = p[3].strip('"')
+
+
+def ram_in_use_gib():
+    total = avail = None
+    with open("/proc/meminfo") as fh:
+        for line in fh:
+            if line.startswith("MemTotal:"):
+                total = int(line.split()[1])
+            elif line.startswith("MemAvailable:"):
+                avail = int(line.split()[1])
+            if total is not None and avail is not None:
+                break
+    if total is None or avail is None:
+        return 91.0          # unknown: assume worst case
+    return max(0.0, (total - avail) / 1048576.0)
+
+
+def hibernate_cost():
+    return ram_in_use_gib() / WRITE_RATE_GBPS + FIXED_OVERHEAD
+
+
+def do_hibernate(reason):
+    gib = ram_in_use_gib()
+    log("HIBERNATING - %s (ram in use %.1f GiB, est cost %.0fs)"
+        % (reason, gib, hibernate_cost()))
+    r = subprocess.run(["/usr/bin/systemctl", "hibernate"])
+    if r.returncode != 0:
+        log("systemctl hibernate FAILED rc=%d - upsmon LOWBATT remains the backstop"
+            % r.returncode)
+    else:
+        log("resumed from hibernation")
+
+
+def main():
+    load_tunables(initial=True)
+    log("started: reserve=%.0f%% safety=%.0fs write_rate=%.2f GB/s overhead=%.0fs poll=%.0fs"
+        % (RESERVE_PCT, SAFETY_SEC, WRITE_RATE_GBPS, FIXED_OVERHEAD, POLL))
+    ups = Upsd(UPS_HOST, UPS_PORT)
+    ob_since = None
+    last_good = time.time()
+    hits = 0
+    last_report = 0.0
+
+    while True:
+        now = time.time()
+        load_tunables()
+        try:
+            v = ups.list_vars(UPS_NAME)
+            last_good = now
+        except Exception as e:
+            ups.close()
+            if ob_since is not None and (now - last_good) >= COMMS_LOSS_LIMIT:
+                do_hibernate("on battery and blind to the UPS for %.0fs" % (now - last_good))
+                ob_since, hits = None, 0
+            else:
+                log("upsd read failed: %s" % e)
+            time.sleep(POLL)
+            continue
+
+        status = v.get("ups.status", "")
+        on_batt = "OB" in status.split()
+
+        if not on_batt:
+            if ob_since is not None:
+                log("back on line power after %.0fs - standing down" % (now - ob_since))
+            ob_since, hits = None, 0
+            time.sleep(POLL)
+            continue
+
+        if ob_since is None:
+            ob_since, hits = now, 0
+            log("ON BATTERY (%s) - settling %.0fs before measuring" % (status, SETTLE_SEC))
+
+        elapsed = now - ob_since
+        if elapsed < SETTLE_SEC:
+            time.sleep(POLL)
+            continue
+
+        try:
+            charge = float(v.get("battery.charge", "0"))
+            runtime = float(v.get("battery.runtime", "0"))
+        except ValueError:
+            time.sleep(POLL)
+            continue
+
+        cost = hibernate_cost()
+        budget = cost + SAFETY_SEC
+        ttr = runtime * max(0.0, charge - RESERVE_PCT) / charge if charge > 0 else 0.0
+        floor = charge <= RESERVE_PCT
+        trigger = floor or ttr <= budget
+
+        if now - last_report >= REPORT_EVERY:
+            log("on battery %.0fs | charge=%.0f%% runtime=%.0fs ram=%.1fGiB "
+                "cost=%.0fs budget=%.0fs time_to_reserve=%.0fs%s"
+                % (elapsed, charge, runtime, ram_in_use_gib(), cost, budget, ttr,
+                   "   <-- TRIGGER" if trigger else ""))
+            last_report = now
+
+        if trigger:
+            hits += 1
+            if hits >= DEBOUNCE:
+                why = ("charge floor %.0f%% <= %.0f%%" % (charge, RESERVE_PCT) if floor
+                       else "time_to_reserve %.0fs <= budget %.0fs" % (ttr, budget))
+                do_hibernate(why)
+                ob_since, hits = None, 0
+        else:
+            hits = 0
+
+        time.sleep(POLL)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

@@ -1,0 +1,10 @@
+[Unit]
+Description=Assert Linux first in UEFI BootOrder
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/assert-boot-order
+
+[Install]
+WantedBy=multi-user.target
