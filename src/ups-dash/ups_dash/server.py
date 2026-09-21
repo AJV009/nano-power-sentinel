@@ -173,6 +173,7 @@ def make_handler(collector, store):
                         {k: "jetson" for k in cfgmod.LOCAL_SPEC},
                         **{k: "box" for k in cfgmod.BOX_SPEC}),
                     "wake_reserve_margin": cfgmod.WAKE_RESERVE_MARGIN,
+                    "baseline": cfgmod.BASELINE,
                     "files": {"jetson": cfgmod.read_local(),
                               "box": cfgmod.read_box(collector.box.base)},
                 })
@@ -220,6 +221,15 @@ def make_handler(collector, store):
             # Switching the UPS output off is the one action here with no
             # software undo, so it lives behind a typed confirmation phrase
             # and a cancellable delay. See upsoff.py for the full reasoning.
+            if action == "reset-config":
+                result, code = cfgmod.reset(collector.box.base,
+                                            collector.tunables)
+                if code == 200 and result.get("applied"):
+                    store.add_event(time.time(), states.CONFIG_CHANGE,
+                                    collector.episodes.id,
+                                    dict(result["applied"], reset=True))
+                return self._json(code, result)
+
             if action == "ups-off":
                 result, code = upsoff.request(collector, store, body)
                 return self._json(code, result)

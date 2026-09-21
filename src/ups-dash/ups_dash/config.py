@@ -27,6 +27,31 @@ BOX_SPEC = {
     "comms_loss_limit_sec": (15.0, 600.0),
 }
 
+# The known-good baseline the Reset button restores.
+#
+# ⚠ THESE MUST MATCH the compiled-in defaults in hibernate-governor and
+# ups-sentinel, or "reset" and "fresh install" would disagree and the same
+# system would behave differently depending on its history.
+#
+# Reset WRITES these values rather than deleting the override file, because
+# the loaders keep their current value for any key that is simply absent --
+# deleting the file would revert nothing until the next restart, which is
+# exactly the wrong behaviour for a button someone reaches for after
+# misconfiguring something.
+BASELINE = {
+    # governor (workstation)
+    "reserve_pct": 30.0,
+    "safety_sec": 30.0,
+    "write_rate_gbps": 0.5,
+    "fixed_overhead_sec": 15.0,
+    "comms_loss_limit_sec": 45.0,
+    # sentinel (jetson)
+    "wake_charge_pct": 50.0,
+    "mains_stable_sec": 120.0,
+    "wake_tries": 5.0,
+    "wake_interval_sec": 30.0,
+}
+
 # THE ONE GENUINELY DANGEROUS COMBINATION.  If the box is allowed to wake at
 # or below the reserve, it wakes into a charge where the governor immediately
 # wants to hibernate again -- a wake/hibernate flapping loop that would chew
@@ -150,3 +175,17 @@ def apply(updates, box_url, live_tunables):
     if warning:
         out["warning"] = warning
     return out, 200
+
+
+def reset(box_url, live_tunables):
+    """Restore every tunable to the known-good baseline and apply it.
+
+    Deliberately routed through apply() rather than writing the files
+    directly, so a reset gets the same validation, the same cross-machine
+    handling and the same audit event as any other change. A reset that
+    bypassed the safety checks would be the one path able to install a
+    dangerous combination.
+    """
+    result, code = apply(dict(BASELINE), box_url, live_tunables)
+    result["reset_to"] = dict(BASELINE)
+    return result, code

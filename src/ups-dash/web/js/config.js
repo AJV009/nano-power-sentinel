@@ -1,6 +1,6 @@
 /* CONFIG -- "what are the thresholds, and what happens if I change them?" */
 
-import { get, put } from "./api.js";
+import { get, put, post } from "./api.js";
 import { TIER1, TIER2, TIER3, validate } from "./configdefs.js";
 import { num, dur, isNum, esc } from "./format.js";
 
@@ -148,7 +148,87 @@ export async function renderConfig(root, carryMsg, carryCls) {
     <section class="panel"><h2>Margins</h2>${TIER2.map((x) => row(x, tun)).join("")}</section>
     <div id="savebar" class="btnrow hidden"><button class="btn primary" id="save">Apply</button></div>
     <section class="panel"><h2>Locked — shown so the reasoning is not lost</h2>
-      ${TIER3.map(lockedRow).join("")}</section>`;
+      ${TIER3.map(lockedRow).join("")}</section>
+    ${resetSection(tun, d.baseline)}`;
   wire(root, tun);
+  wireReset(root);
   refreshSaveBar(root, tun);
+}
+
+/* Reset to the known-good baseline.
+
+   Not a dangerous action — it restores the values this system was tuned and
+   tested with — so one confirmation is right, unlike the emergency controls.
+   What it does need is to not be a mystery button: it lists exactly what it
+   will restore and how many settings currently differ, so pressing it is an
+   informed choice rather than a leap. */
+
+function driftFrom(tun, baseline) {
+  if (!baseline) return [];
+  return Object.keys(baseline).filter((k) =>
+    isNum(tun[k]) && Math.abs(tun[k] - baseline[k]) > 1e-9);
+}
+
+function labelFor(key) {
+  const def = TIER1.concat(TIER2).find((d) => d.key === key);
+  return def ? def.name : key;
+}
+
+function resetSection(tun, baseline) {
+  if (!baseline) return "";
+  const drift = driftFrom(tun, baseline);
+  const dec = (v) => (v < 1 ? 2 : 0);
+  const rows = Object.keys(baseline).map((k) => {
+    const changed = drift.indexOf(k) !== -1;
+    const cur = isNum(tun[k]) ? num(tun[k], dec(baseline[k])) : "?";
+    const base = num(baseline[k], dec(baseline[k]));
+    return `<div class="kv"><span class="k">${esc(labelFor(k))}</span>
+      <span class="v">${changed ? `${cur} → <b>${base}</b>` : base}</span></div>`;
+  }).join("");
+
+  return `
+    <section class="panel"><h2>Reset</h2>
+      <div class="notebox">
+        ${drift.length
+          ? `<b>${drift.length} setting${drift.length === 1 ? "" : "s"} differ from the baseline.</b>
+             Resetting restores the values this system was tuned and tested with,
+             and applies them immediately.`
+          : "Everything already matches the baseline."}
+      </div>
+      <div class="cfg">${rows}</div>
+      <div id="resetresult" class="notebox hidden"></div>
+      <div class="btnrow">
+        <button class="btn ${drift.length ? "primary" : ""}" id="doreset"
+                ${drift.length ? "" : "disabled"}>Reset all to baseline</button>
+      </div>
+    </section>`;
+}
+
+function wireReset(root) {
+  const btn = root.querySelector("#doreset");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    if (!window.confirm("Reset every threshold to the tested baseline and apply it now?")) return;
+    btn.disabled = true;
+    btn.textContent = "resetting…";
+    const res = await post("api/control/reset-config", {});
+    const out = root.querySelector("#resetresult");
+    out.classList.remove("hidden");
+    if (!res.ok) {
+      out.className = "warnbox";
+      out.innerHTML = esc((res.data && res.data.error) || `failed (${res.status})`);
+      btn.disabled = false;
+      btn.textContent = "Reset all to baseline";
+      return;
+    }
+    const rj = Object.entries(res.data.rejected || {});
+    out.className = rj.length ? "warnbox" : "notebox";
+    out.innerHTML = [
+      `Reset applied: ${Object.keys(res.data.applied || {}).length} settings.`,
+      rj.length ? `Not applied: ${rj.map(([k, v]) => `${esc(k)} (${esc(v)})`).join(", ")}` : "",
+    ].filter(Boolean).join("<br>");
+    // Re-read so the page reflects what the units actually loaded, rather
+    // than what we asked for.
+    setTimeout(() => renderConfig(root, out.innerHTML, out.className), 1500);
+  });
 }
