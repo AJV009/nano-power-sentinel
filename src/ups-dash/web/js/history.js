@@ -15,13 +15,19 @@ function summary(ep) {
   if (isNum(ep.charge_start) && isNum(ep.charge_min)) {
     bits.push(`${pct(ep.charge_start)} → ${pct(ep.charge_min)}`);
   }
-  if (ep.hibernated) {
-    const cost = isNum(ep.hib_secs) ? ` in ${dur(ep.hib_secs)}` : "";
-    bits.push(`hibernated${cost}`);
+  // The tracker writes the whole story (hibernated / parked / back via ...)
+  // as `summary` when the episode closes; before 2026-09-22 nothing did, and
+  // every card claimed "rode it out".
+  if (ep.summary) {
+    bits.push(esc(ep.summary));
+  } else if (ep.hibernated) {
+    bits.push("hibernated");
+    if (ep.wake_cause) bits.push(`back via ${esc(ep.wake_cause)}`);
+  } else if (ep.kind === "outage") {
+    bits.push(ep.ended ? "box stayed up" : "in progress");
   } else {
-    bits.push("rode it out");
+    bits.push(ep.ended ? "box was down" : "box is down");
   }
-  if (ep.wake_cause) bits.push(`woke via ${esc(ep.wake_cause)}`);
   return bits.join(" · ");
 }
 

@@ -103,6 +103,23 @@ turns the wake source back off. The shipped unit greps before writing.
 have no explicit "Wake on LAN" setting — WoL is governed by ErP being
 *disabled* plus the OS arming the NIC.
 
+⚠ **Never let the box sleep on its own.** It runs long headless jobs; only
+the outage path (the governor, the park guard) and an explicit Hibernate may
+put it down. Pin that down on three layers:
+
+```bash
+sudo install -D -m 644 src/box/logind/10-never-idle.conf \
+     /etc/systemd/logind.conf.d/10-never-idle.conf   # IdleAction=ignore
+sudo systemctl kill -s HUP systemd-logind
+sudo systemctl mask suspend.target hybrid-sleep.target suspend-then-hibernate.target
+xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/inactivity-on-ac -n -t int -s 14   # 14 = Never
+```
+
+Leave `hibernate.target` **unmasked** — the whole outage design depends on
+it. Check: `busctl call org.freedesktop.login1 /org/freedesktop/login1
+org.freedesktop.login1.Manager CanSuspend` → `no`, `CanHibernate` → `yes`.
+Screen blanking (DPMS) is fine and untouched.
+
 ⚠ Set **Restore on AC power loss ("AC BACK") = Always On** if the battery-floor
 park is enabled (it is by default). A park cuts the box's standby power, and
 the NIC forgets its WoL arming, so the box can only come back by powering

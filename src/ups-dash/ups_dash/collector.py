@@ -209,7 +209,8 @@ class Collector(object):
             snap["wake_hold"], self.tunables, self.episodes.id)
         self.episodes.update(now, ups, box_state, ups.get("charge"),
                              lambda since: self.ring_since(since), testing,
-                             snap["park"].get("phase") is not None)
+                             snap["park"].get("phase") is not None, snap["park"],
+                             ((sentinel or {}).get("wake") or {}).get("last_wol"))
         snap["episode"] = self.episodes.snapshot(now)
         # The authoritative reading of what is happening. Every piece of
         # user-facing text -- state line, timeline, notifications -- is built

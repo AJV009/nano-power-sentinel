@@ -1932,3 +1932,69 @@ deletes anything it does not own. The stale-hold valve moved to ups-dash.
 2. **ups-dash.** It created `dash.json` (no legacy files were left to
    migrate). `sentinel_status` is `fresh`, and CONFIG's source reads
    "sentinel: ups-sentinel state".
+
+---
+
+## 2026-09-22 — End-to-end park test, and what it exposed
+
+Run with test thresholds (reserve 80 %, floor 80 %, wake gate 90 %) and an
+all-core CPU burn to drain faster. Trace:
+`private/research/e2e-park-20260922.log`.
+
+```
+23:00:45  mains pulled at 100 %            (UPS reason: "input frequency out of range")
+23:06:41  governor hibernates the box      (83 % -> down at 76 %)
+23:08:15  park armed  (load 0 %, 60 s settle)
+23:09:16  OB OFF -- output cut, 61 s after arming; pack holds at 78 %
+23:09:42  UPS switches itself off (unreadable, state PARKED -- not BLIND)
+23:10:08  mains back -> output returns ~3 s later
+23:10:18  box powers itself on (AC BACK)
+23:11:10  awake -> ups-dash re-hibernates it (78 % < the 90 % test gate)
+23:11:26  down again; park story closed, sentinel takes over
+23:13:43  thresholds restored -> gate opens -> WoL
+23:14:43  box awake. Hands-off from 23:00:45.
+```
+
+**All eight phone notifications arrived**, in order, with the right
+priorities. The box **resumed** rather than cold-booting: no `box_rebooted`
+event, so its boot id was unchanged and the session survived. What looked
+like a login screen was the lock screen after resume.
+
+### Two bugs this exposed
+
+**1. HISTORY said "rode it out" for every outage.** The `hibernated`,
+`resumed_at` and `wake_cause` columns existed and nothing ever wrote them.
+The tracker now records the story (hibernated at X %, UPS parked at Y %, back
+HH:MM via …) and writes it as the episode `summary`; past episodes were
+backfilled from their own 1 Hz traces and events, with a wake cause only
+where the records prove one.
+
+**2. The "hibernate imminent" push was ~3 min early** (23:03:53 said "~48 s";
+the governor hibernated at 23:06:41). The dashboard's projection and the
+governor's own trigger are separate calculations. Not yet fixed.
+
+### Self-inflicted, noted
+
+The CPU burner ran with a wall-clock deadline so it would not survive the
+hibernate. It was still inside that window when the box resumed, so it kept
+burning ~216 W until killed by hand. Kill load generators explicitly at the
+end of a test.
+
+⚠ And `pkill -f <pattern>` matched its own ssh command line twice tonight,
+killing the shell. Use `pkill -f "[b]urn[.]py"`, and never put the literal
+name elsewhere in the same command.
+
+### The box may never sleep on its own
+
+It will run long headless jobs, so idle sleep is now impossible rather than
+merely "off by default":
+
+- `/etc/systemd/logind.conf.d/10-never-idle.conf` pins `IdleAction=ignore`.
+- `suspend.target`, `hybrid-sleep.target` and `suspend-then-hibernate.target`
+  are **masked** — logind now answers `CanSuspend: no`.
+- XFCE "sleep when inactive" set to Never on AC and battery.
+- `hibernate.target` stays available (`CanHibernate: yes`): the outage path
+  and the Hibernate button depend on it. Screen blanking is untouched.
+
+The only three things that can put this box down are now the governor during
+an outage, the park guard after one, and an explicit Hibernate.
