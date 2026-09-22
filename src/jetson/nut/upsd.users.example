@@ -11,3 +11,11 @@
     instcmds = load.off.delay
     instcmds = load.off
     instcmds = shutdown.stop
+    instcmds = shutdown.reboot
+    instcmds = shutdown.return
+    instcmds = beeper.enable
+    instcmds = beeper.disable
+    instcmds = beeper.mute
+    instcmds = test.battery.start.quick
+    instcmds = test.battery.stop
+    actions = SET

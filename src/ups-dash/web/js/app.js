@@ -42,8 +42,11 @@ function initTheme() {
     const next = now === "light" ? "dark" : "light";
     applyTheme(next);
     try { localStorage.setItem("ups-dash-theme", next); } catch (e) { /* ignore */ }
-    if (current !== "now") show(current);
-    else if (snap) paintNow();
+    // Charts read colours at draw time, so their tabs repaint. CONFIG has
+    // no canvas -- CSS variables re-theme it -- and re-rendering it here
+    // would drop the scroll position in the middle of an edit.
+    if (current === "now") { if (snap) paintNow(); }
+    else if (current !== "config") show(current);
   });
 }
 
@@ -78,7 +81,7 @@ function show(tab) {
   if (tab === "now") { view.innerHTML = ""; paintNow(); }
   else if (tab === "history") renderHistory(view);
   else if (tab === "health") renderHealth(view);
-  else if (tab === "config") renderConfig(view);
+  else if (tab === "config") renderConfig(view, () => current === "config");
 }
 
 function onSnapshot(s) {

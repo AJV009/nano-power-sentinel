@@ -126,9 +126,8 @@ These cost real time to discover. They are why the design looks like it does.
 ### The UPS will not turn its own output back on
 
 The plan was: hibernate the box, then cut the UPS output to save battery, and
-let it restore power when mains returns. **This UPS cannot do that.**
-`upscmd -l` offers `load.off` and `load.off.delay` but no `load.on` and no
-`shutdown.return`. Tested for real:
+let it restore power when mains returns. **The command that was used cannot do
+that.** `load.off.delay` was the only killpower on offer. Tested for real:
 
 ```
 load.off.delay fired → output cut → mains restored → ups.status = OL OFF
@@ -140,7 +139,14 @@ It comes back to life, charges, and talks over USB — with its output still
 output there is no +5VSB, so Wake-on-LAN cannot rescue the machine either.
 Killpower was abandoned; Wake-on-LAN became the primary recovery path.
 
-**Check your own UPS with `upscmd -l <ups>` before designing around killpower.**
+A later dig through the driver source, the HID spec and a descriptor dump found
+a **different** register. `shutdown.reboot 1` cuts, then brings the output
+back on by itself: ~4 s later on mains, or ~1 s after mains returns on battery.
+Bench-tested, [UPS-TOOLING.md](docs/UPS-TOOLING.md). Nothing brings back an
+output that `load.off` latched off, though; there is no remote "on".
+
+**Check your own UPS with `upscmd -l <ups>`, then bench-test what each command
+actually does, before designing around killpower.**
 
 ### "Cannot read the sensor" is a third state
 
@@ -239,6 +245,7 @@ default and logs loudly — per key, so one bad value never discards a good one.
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | architecture and the reasoning behind it |
 | [docs/DASHBOARD.md](docs/DASHBOARD.md) | dashboard spec, state model, event catalog |
+| [docs/UPS-TOOLING.md](docs/UPS-TOOLING.md) | what NUT can and cannot do with this APC: registers, polling, bench tests |
 | [docs/BUILD-LOG.md](docs/BUILD-LOG.md) | the full build log — every change, every bug, with undo steps |
 
 The build log is the unusual one. It is kept as a running record including the
@@ -291,9 +298,22 @@ reading. Everything below was genuinely used or consulted.
 
 ### Hardware documentation
 
-- APC Back-UPS HID tables via NUT's `usbhid-ups` driver — the definitive
-  answer to what a given UPS can and cannot do. **Run `upscmd -l` on yours
-  before designing around killpower.**
+- APC Back-UPS HID tables via NUT's `usbhid-ups` driver (`drivers/apc-hid.c`).
+  **Run `upscmd -l` on yours before designing around killpower**, then
+  bench-test what each command actually does.
+- **[USB HID Power Device Class 1.0](https://www.usb.org/document-library/power-device-class-document-10)**
+  — what `DelayBeforeReboot`, `DelayBeforeShutdown` and `DelayBeforeStartup`
+  are *supposed* to mean.
+- **[apcupsd](https://github.com/networkupstools/apcupsd)** —
+  `src/drivers/usb/usb.c`. It documents APC's real, non-standard shutdown
+  registers, including the BR-family killpower loop workaround. That source
+  is how the self-restoring 0x40 register was found.
+- **[NUT issue #2683](https://github.com/networkupstools/nut/issues/2683)
+  and [PR #3566](https://github.com/networkupstools/nut/pull/3566)** —
+  decoded PowerChute USB captures and bench tests on Back-UPS BX/XS units.
+  That work maps `shutdown.return` onto the same register this unit uses.
+- **[NUT device dump library](https://github.com/networkupstools/nut-ddl)** —
+  sibling-model variable sets.
 - Realtek RTL8111H register layout, for the LED control bitfield.
 
 ### Built with

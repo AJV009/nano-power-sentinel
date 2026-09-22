@@ -17,6 +17,7 @@ def build(raw):
     flags = nut.status_flags(raw)
     load_pct = nut.as_int(raw, "ups.load")
     nominal = nut.as_float(raw, "ups.realpower.nominal") or DEFAULT_NOMINAL_W
+    test_result = (raw or {}).get("ups.test.result")
     return {
         "ok": ok,
         "status": (raw or {}).get("ups.status"),
@@ -25,6 +26,8 @@ def build(raw):
         "charging": ("CHRG" in flags) if ok else None,
         "low_battery": ("LB" in flags) if ok else None,
         "output_off": ("OFF" in flags) if ok else None,
+        "replace_battery": ("RB" in flags) if ok else None,
+        "overload": ("OVER" in flags) if ok else None,
         "charge": nut.as_float(raw, "battery.charge"),
         "runtime": nut.as_int(raw, "battery.runtime"),
         "batt_v": nut.as_float(raw, "battery.voltage"),
@@ -39,6 +42,21 @@ def build(raw):
         "transfer_low": nut.as_float(raw, "input.transfer.low"),
         "transfer_high": nut.as_float(raw, "input.transfer.high"),
         "batt_mfr_date": (raw or {}).get("battery.mfr.date"),
-        "test_result": (raw or {}).get("ups.test.result"),
+        "test_result": test_result,
         "model": (raw or {}).get("device.model"),
+        # -- added for the settings / self-test / transfer-cause features --
+        "transfer_reason": (raw or {}).get("input.transfer.reason"),
+        "sensitivity": (raw or {}).get("input.sensitivity"),
+        "beeper": (raw or {}).get("ups.beeper.status"),
+        "timer_shutdown": nut.as_int(raw, "ups.timer.shutdown"),
+        "timer_reboot": nut.as_int(raw, "ups.timer.reboot"),
+        "lb_charge": nut.as_float(raw, "battery.charge.low"),
+        "lb_runtime": nut.as_int(raw, "battery.runtime.low"),
+        # "In progress" while a self-test (manual or automatic) is running;
+        # briefly true during the OL OFF / OL DISCHRG blip NUT issue #2104
+        # describes -- callers must not treat that blip alone as OUTPUT_OFF.
+        "self_test": ("progress" in (test_result or "").lower()) if ok else None,
+        "driver_version": (raw or {}).get("driver.version"),
+        "pollfreq": nut.as_int(raw, "driver.parameter.pollfreq"),
+        "pollinterval": nut.as_int(raw, "driver.parameter.pollinterval"),
     }

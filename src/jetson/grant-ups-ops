@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Let the dashboard's NUT user run the non-destructive UPS operations.
+
+WHY THIS IS NEEDED: `killer` was created for the two emergency cuts and is
+allowed exactly load.off, load.off.delay and shutdown.stop. The features added
+after the UPS-tooling research need a few more:
+
+  shutdown.reboot / shutdown.return   restore-capable cut (register 0x40):
+                                      cuts, then brings the output back --
+                                      at once on mains, at mains return on
+                                      battery. The only way this UPS can
+                                      turn its own output back on.
+  beeper.enable/disable/mute          the mute control
+  test.battery.start.quick/.stop      the battery self-test
+  actions = SET                       the UPS's own thresholds (sensitivity,
+                                      transfer points, low-battery point)
+
+Deliberately NOT granted: test.battery.start.deep (drains the battery to
+recalibrate -- never on a live system) and test.panel.* (pointless).
+
+Idempotent: re-running changes nothing. A dated backup is kept.
+
+TO UNDO: restore /etc/nut/upsd.users.bak-ops-<date>, then `sudo upsd -c reload`.
+
+Run with: sudo ./grant-ups-ops
+"""
+
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+USERS = "/etc/nut/upsd.users"
+CRED = "/etc/ups-dash/upscmd.json"
+SECTION = "killer"
+WANT = [
+    "instcmds = shutdown.reboot",
+    "instcmds = shutdown.return",
+    "instcmds = beeper.enable",
+    "instcmds = beeper.disable",
+    "instcmds = beeper.mute",
+    "instcmds = test.battery.start.quick",
+    "instcmds = test.battery.stop",
+    "actions = SET",
+]
+
+
+def fail(msg):
+    print("ERROR: %s" % msg)
+    sys.exit(1)
+
+
+def patch(text):
+    """Append the missing lines to the [killer] section. Returns (text, added)."""
+    m = re.search(r"^\[%s\]\s*$" % SECTION, text, re.M)
+    if not m:
+        fail("no [%s] section in %s" % (SECTION, USERS))
+    nxt = re.search(r"^\[", text[m.end():], re.M)
+    end = m.end() + nxt.start() if nxt else len(text)
+    body = text[m.end():end]
+    have = {ln.strip() for ln in body.splitlines()}
+    added = [w for w in WANT if w not in have]
+    if not added:
+        return text, []
+    block = body.rstrip("\n") + "\n" + "".join("    %s\n" % a for a in added)
+    if nxt:
+        block += "\n"
+    return text[:m.end()] + block + text[end:], added
+
+
+def verify():
+    """Prove both grants work with harmless requests: beeper.disable is
+    already the UPS's state, and ups.delay.shutdown is a driver-side value
+    being set to what it already is."""
+    import json
+    cred = json.load(open(CRED))
+    s = socket.create_connection(("127.0.0.1", 3493), timeout=5)
+    f = s.makefile("rw")
+
+    def ask(line):
+        f.write(line + "\n")
+        f.flush()
+        return f.readline().strip()
+
+    out = [ask("USERNAME %s" % cred["user"]),
+           ask("PASSWORD %s" % cred["password"]),
+           ask("INSTCMD apc beeper.disable"),
+           ask("SET VAR apc ups.delay.shutdown 20")]
+    s.close()
+    return out
+
+
+def main():
+    if os.geteuid() != 0:
+        fail("must run as root (use sudo)")
+    text = open(USERS).read()
+    new, added = patch(text)
+    if added:
+        bak = "%s.bak-ops-%s" % (USERS, time.strftime("%Y%m%d-%H%M%S"))
+        shutil.copy2(USERS, bak)
+        with open(USERS, "w") as fh:
+            fh.write(new)
+        print("backup: %s" % bak)
+        for a in added:
+            print("added:  %s" % a)
+        subprocess.run(["upsd", "-c", "reload"], check=False)
+        time.sleep(2)
+    else:
+        print("nothing to add -- already granted")
+    try:
+        login_user, login_pw, cmd, setv = verify()
+        ok = cmd == "OK" and setv == "OK"
+        print("verify: INSTCMD -> %s   SET -> %s   %s"
+              % (cmd, setv, "(both granted)" if ok else "(NOT granted)"))
+    except Exception as exc:
+        print("could not self-verify (%s)" % exc)
+
+
+if __name__ == "__main__":
+    main()

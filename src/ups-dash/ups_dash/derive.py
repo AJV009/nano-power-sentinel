@@ -37,24 +37,29 @@ def hibernate_cost(ram_gb, tunables):
 
 
 def project(ups, box_state, charge, runtime, tunables, ram_gb, drain,
-            down_cause=None):
+            down_cause=None, self_test=False):
     """Numbers only. The NARRATIVE lives in states.classify().
 
     `mode` here is kept for the timeline's three visual modes, but it must not
     claim "recovering" unless the box is genuinely waiting to be auto-woken.
     A manually shut-down box, or one whose UPS output has been cut, is never
     going to be woken by the sentinel -- reporting a countdown there is a lie.
+
+    `self_test` is states.self_test_explains(): while True, the OFF / OB a
+    battery test shows is not an output cut or an outage, so the timeline
+    must not say "needs the front-panel button" or start a hibernate
+    countdown beside a state line that says "Self-test".
     """
     out = {"mode": "mains", "drain_pct_min": drain, "eta_empty_sec": None,
            "eta_hibernate_sec": None, "eta_wake_sec": None,
            "hibernate_cost_sec": hibernate_cost(ram_gb, tunables)}
 
     # Output de-energised: no countdown of any kind is meaningful.
-    if (ups.get("flags") or []) and "OFF" in ups.get("flags"):
+    if not self_test and "OFF" in (ups.get("flags") or []):
         out["mode"] = "output_off"
         return out
 
-    if ups.get("on_battery"):
+    if ups.get("on_battery") and not self_test:
         out["mode"] = "battery"
         out["eta_empty_sec"] = runtime
         if runtime is not None and charge:

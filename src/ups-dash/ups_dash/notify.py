@@ -145,6 +145,11 @@ class Notifier(object):
 
     def _check_ups_sustained(self, curr, now):
         ok = (curr.get("ups") or {}).get("ok")
+        # A parked UPS switches its own electronics off, so "unreadable" is
+        # EXPECTED -- the PARKED state push already said so. Keep the clock
+        # at zero rather than paging about it after 120 s.
+        if (curr.get("state") or {}).get("state") == "parked":
+            ok = True
         if ok:
             self._ups_bad_since = None
             self._ups_sustained_sent = False

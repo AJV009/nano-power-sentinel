@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Restart the UPS driver when it stalls while the UPS is still on the bus.
+
+WHY THIS EXISTS: on 2026-09-20 the APC stopped answering mid-outage. The
+kernel log shows NO USB disconnect -- the device stayed enumerated -- and
+upsd reported "Data stale" for 9 minutes until the driver was restarted by
+hand. NUT 2.7.4 only reconnects after a real disconnect; a stall means
+endless timeouts behind "Data stale" and a driver that never exits, so
+systemd's Restart=always cannot help (docs/UPS-TOOLING.md s2).
+
+That stall is what hibernated the box that day: the governor treats "on
+battery and blind for 45 s" as a reason to hibernate. Recovering in ~20 s
+keeps a stall from turning into an unnecessary hibernate.
+
+WHAT IT DOES, and deliberately nothing more:
+  * asks upsd for ups.status every POLL seconds
+  * only "ERR DATA-STALE" counts. "DRIVER-NOT-CONNECTED" means the driver
+    process is gone -- systemd restarts that on its own, and it is also what
+    a deliberate `systemctl stop nut-driver` looks like.
+  * acts only if the APC is still on the USB bus. If it is not, the UPS is
+    unplugged or switched itself off (a load.off on battery does that), and
+    restarting the driver would only churn.
+  * at most one restart per COOLDOWN.
+
+A newer driver (NUT 2.8.5+) reconnects on its own after a stalled poll.
+This stays as the outer layer: it is independent of whichever driver runs.
+"""
+
+import glob
+import socket
+import subprocess
+import sys
+import time
+
+UPS = "apc"
+VENDOR = "051d"          # APC
+POLL = 5.0
+STALE_LIMIT = 20.0       # continuous stale before acting
+COOLDOWN = 120.0         # minimum gap between restarts
+UNIT = "nut-driver.service"
+
+
+def log(msg):
+    print("[nut-stall-watchdog] %s" % msg, flush=True)
+
+
+def ups_status():
+    """Returns ("ok", status) | ("stale", None) | ("other", error text)."""
+    try:
+        s = socket.create_connection(("127.0.0.1", 3493), timeout=5)
+        s.settimeout(5)
+        s.sendall(("GET VAR %s ups.status\n" % UPS).encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(1024)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+        line = buf.decode("utf-8", "replace").strip()
+    except Exception as exc:
+        return "other", "%s: %s" % (type(exc).__name__, exc)
+    if line.startswith("VAR "):
+        return "ok", line.split('"')[1] if '"' in line else line
+    if "DATA-STALE" in line:
+        return "stale", None
+    return "other", line
+
+
+def on_bus():
+    for path in glob.glob("/sys/bus/usb/devices/*/idVendor"):
+        try:
+            if open(path).read().strip() == VENDOR:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def main():
+    stale_since = None
+    last_restart = 0.0
+    said_absent = False
+    log("watching %s: restart %s after %ds of Data stale while the UPS is on "
+        "the bus (cooldown %ds)" % (UPS, UNIT, STALE_LIMIT, COOLDOWN))
+    while True:
+        now = time.time()
+        kind, _ = ups_status()
+        if kind != "stale":
+            if stale_since is not None:
+                log("data flowing again after %.0fs stale" % (now - stale_since))
+            stale_since, said_absent = None, False
+        else:
+            stale_since = stale_since or now
+            age = now - stale_since
+            if age >= STALE_LIMIT and now - last_restart >= COOLDOWN:
+                if on_bus():
+                    log("STALL: stale for %.0fs with the UPS still on the bus "
+                        "- restarting %s" % (age, UNIT))
+                    subprocess.run(["systemctl", "restart", UNIT], check=False)
+                    last_restart = time.time()
+                elif not said_absent:
+                    log("stale, but the UPS is not on the USB bus (unplugged, "
+                        "or it switched itself off) - not restarting")
+                    said_absent = True
+        time.sleep(POLL)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)

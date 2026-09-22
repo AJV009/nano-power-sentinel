@@ -19,7 +19,7 @@ import os, socket, subprocess, time
 
 UPS_HOST, UPS_PORT, UPS_NAME = "10.0.0.10", 3493, "apc"
 
-RESERVE_PCT       = 30.0   # % charge that must remain AFTER hibernation completes
+RESERVE_PCT       = 50.0   # % charge that must remain AFTER hibernation completes
 SAFETY_SEC        = 30.0
 WRITE_RATE_GBPS   = 0.5    # conservative; measured 0.72 GB/s on 2026-09-20
 FIXED_OVERHEAD    = 15.0   # freeze/snapshot/power-off overhead
@@ -27,6 +27,14 @@ SETTLE_SEC        = 30.0   # ignore the post-transfer gauge transient
 DEBOUNCE          = 3      # consecutive triggering samples required
 POLL              = 1.0
 COMMS_LOSS_LIMIT  = 45.0   # on battery + blind this long -> hibernate anyway
+# A loop gap this long means the machine was ASLEEP (hibernated by the
+# dashboard, box-agent or a human -- not by us). Everything measured before
+# it is stale, so the blind clock restarts at wake-up with RESUME_GRACE for
+# the network. Without this, hours asleep counted as hours blind: on
+# 2026-09-22 every wake was re-hibernated 4 s later ("blind ... for 78788s"),
+# before the NIC had even come up.
+RESUME_GAP_SEC    = 60.0
+RESUME_GRACE      = 90.0
 REPORT_EVERY      = 15.0
 
 
@@ -166,16 +174,25 @@ def main():
     last_good = time.time()
     hits = 0
     last_report = 0.0
+    last_loop = time.time()
+    grace_until = 0.0
 
     while True:
         now = time.time()
+        if now - last_loop > RESUME_GAP_SEC:
+            log("woke after %.0fs asleep - blind clock restarts, %.0fs grace for "
+                "the network" % (now - last_loop, RESUME_GRACE))
+            last_good, grace_until = now, now + RESUME_GRACE
+        last_loop = now
         load_tunables()
         try:
             v = ups.list_vars(UPS_NAME)
             last_good = now
         except Exception as e:
             ups.close()
-            if ob_since is not None and (now - last_good) >= COMMS_LOSS_LIMIT:
+            limit = (COMMS_LOSS_LIMIT if now >= grace_until
+                     else max(COMMS_LOSS_LIMIT, RESUME_GRACE))
+            if ob_since is not None and (now - last_good) >= limit:
                 do_hibernate("on battery and blind to the UPS for %.0fs" % (now - last_good))
                 ob_since, hits = None, 0
             else:

@@ -9,6 +9,13 @@ Environment=SENTINEL_ARMED=0
 ExecStart=/usr/local/sbin/ups-sentinel
 Restart=always
 RestartSec=10
+# /run/ups-sentinel/state.json: the sentinel's own published state
+# (docs/LEDGER.md), on tmpfs. 0755 so the unprivileged ups-dash can read it.
+# systemd removes this directory whenever the service stops or restarts. That
+# is fine: the sentinel rebuilds its state from scratch on every start and
+# republishes on its first pass, and a missing file reads as "not publishing".
+RuntimeDirectory=ups-sentinel
+RuntimeDirectoryMode=0755
 
 [Install]
 WantedBy=multi-user.target

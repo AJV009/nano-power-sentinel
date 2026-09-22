@@ -44,10 +44,18 @@ edge (never miss a real event) but require a confirmed `True -> False` edge
 to announce the all-clear (never falsely claim recovery).  This exact bug
 already shipped once in this project for `on_battery`; the same asymmetry
 now applies to `low_battery` and to service `healthy`, for the same reason.
+
+SELF-TESTS: a battery test shows OL OFF / OL DISCHRG for seconds (NUT
+#2104) and used to page as UPS OUTPUT OFF. states.classify() now answers
+SELF_TEST for that, and `_mains()` treats an on-battery reading that
+`notify_util.testing()` explains as not-on-battery -- so a test produces
+neither "Mains lost" nor the matching "Mains restored", only its verdict.
 """
 
-from .notify_events_states import state_events
-from .notify_util import _g, _n, ep_suffix, ups_line
+from . import events, states
+from .notify_events_states import park_events, state_events
+from .notify_util import (_g, _n, ep_suffix, park_phase, testing, ups_flag,
+                          ups_line)
 
 HIBERNATE_IMMINENT_SEC = 60.0
 # hibernate-governor's own safety_sec is commonly ~30s; alerting a bit ahead
@@ -55,16 +63,34 @@ HIBERNATE_IMMINENT_SEC = 60.0
 # goes dark, not arrive describing something already over.
 
 
+def _on_battery(snap):
+    """`ups.on_battery` with a running self-test's reading set aside --
+    the test switches the load to the pack on purpose. Stays None when
+    unreadable; a test never turns "unknown" into "on mains"."""
+    ob = _g(snap, "ups", "on_battery")
+    return False if (ob is True and testing(snap)) else ob
+
+
 def _mains(prev, curr, ts):
     """`on_battery` edges. Independent of `curr["state"]` on purpose: an
     outage that starts while the box is already down (rare, but possible)
     still deserves this event even though the box-level state the same tick
-    is OUTAGE_DOWN, not ON_BATTERY."""
+    is OUTAGE_DOWN, not ON_BATTERY.
+
+    Self-test readings are masked, not dropped: if the pack is still
+    carrying the load once the test stops explaining it (a real outage that
+    began mid-test), THAT tick is the edge and "Mains lost" fires then --
+    late, never lost (the same reasoning as notify.py's DEFERRED, NOT
+    DROPPED). And a test-masked stretch never earns a "Mains restored"."""
     out = []
-    p_ob = _g(prev, "ups", "on_battery")
-    c_ob = _g(curr, "ups", "on_battery")
+    p_ob = _on_battery(prev)
+    c_ob = _on_battery(curr)
+    if p_ob is None and park_phase(prev) in (states.PARK_ARMED, states.PARK_PARKED):
+        # A parked UPS is silent ON PURPOSE, and it only ever parks on
+        # battery: its return with mains is the confirmed edge, not a guess.
+        p_ob = True
     if c_ob is True and p_ob is not True:
-        out.append(("mains_lost", "Mains lost",
+        out.append((events.MAINS_LOST, "Mains lost",
                     "UPS switched to battery power. %s%s"
                     % (ups_line(curr), ep_suffix(curr)),
                     "high", ["warning", "battery"], ts))
@@ -73,11 +99,21 @@ def _mains(prev, curr, ts):
         # confirmed True -> confirmed False edge counts as "restored". A
         # None (unreadable) anywhere in this transition must never produce
         # this message -- see module docstring.
-        out.append(("mains_restored", "Mains restored",
-                    "UPS reports mains power is back. Charge %s%%."
-                    % _n(_g(curr, "ups", "charge")),
+        out.append((events.MAINS_RESTORED, "Mains restored",
+                    "UPS reports mains power is back%s. Charge %s%%."
+                    % (_outage_was(curr), _n(_g(curr, "ups", "charge"))),
                     "default", ["white_check_mark", "electric_plug"], ts))
     return out
+
+
+def _outage_was(curr):
+    """` -- the outage was: <reason>` once snap["transfer"] can be believed
+    (see upsextras.py: a blip shorter than pollfreq never got a fresh read,
+    so its reason would describe the transfer before it)."""
+    if _g(curr, "transfer", "trusted") is not True:
+        return ""
+    reason = _g(curr, "transfer", "reason")
+    return " -- the outage was: %s" % reason if reason else ""
 
 
 def _hibernate_imminent(prev, curr, ts):
@@ -90,7 +126,7 @@ def _hibernate_imminent(prev, curr, ts):
     c_imminent = (c_mode == "battery" and isinstance(c_eta, (int, float))
                  and c_eta <= HIBERNATE_IMMINENT_SEC)
     if c_imminent and not p_imminent:
-        return [("hibernate_imminent", "Hibernate imminent",
+        return [(events.HIBERNATE_IMMINENT, "Hibernate imminent",
                  ("hibernate-governor is projected to hibernate the box in "
                   "~%ds.%s" % (max(0, int(c_eta)), ep_suffix(curr))),
                  "max", ["rotating_light", "hourglass_flowing_sand"], ts)]
@@ -103,11 +139,13 @@ def _box_woke(prev, curr, ts):
     is covered by the states.py-driven events in notify_events_states.py)."""
     p_state = _g(prev, "box", "state")
     c_state = _g(curr, "box", "state")
+    if park_phase(curr) == states.PARK_RETURNING:
+        return []   # powered itself on after a park; the guard's push says so
     if c_state == "awake" and p_state in ("hibernated", "unreachable"):
         # Not from "unknown": that is the collector's own startup state
         # before the first successful poll, and firing "woke" for that would
         # just mean "the daemon restarted", not "the box resumed".
-        return [("box_woke", "Box woke",
+        return [(events.BOX_WOKE, "Box woke",
                  "The box is back (state=awake).", "default",
                  ["computer"], ts)]
     return []
@@ -122,21 +160,18 @@ def _battery_flags(prev, curr, ts):
     p_lb = _g(prev, "ups", "low_battery")
     c_lb = _g(curr, "ups", "low_battery")
     if c_lb is True and p_lb is not True:
-        out.append(("low_battery", "LOW BATTERY",
+        out.append((events.LOW_BATTERY, "LOW BATTERY",
                     "UPS reports LOW BATTERY -- %s The hibernate governor "
                     "should already be acting on this.%s"
                     % (ups_line(curr), ep_suffix(curr)),
                     "max", ["battery", "rotating_light"], ts))
 
-    # RB rides the raw flag list, not a tri-state field like low_battery, so
-    # it is only trustworthy while the UPS is actually readable -- an
-    # unreadable read reports flags=[], which must NOT read as "RB cleared".
-    c_ok = _g(curr, "ups", "ok")
-    p_ok = _g(prev, "ups", "ok")
-    c_flags = _g(curr, "ups", "flags") or []
-    p_flags = _g(prev, "ups", "flags") or []
-    if c_ok and "RB" in c_flags and not (p_ok and "RB" in p_flags):
-        out.append(("replace_battery", "Replace battery",
+    # RB is the tri-state ups.replace_battery (None while unreadable -- an
+    # unreadable read reports flags=[], which must NOT read as "RB cleared").
+    # Same edge as low_battery: fire on anything -> True.
+    if (ups_flag(curr, "replace_battery", "RB") is True
+            and ups_flag(prev, "replace_battery", "RB") is not True):
+        out.append((events.REPLACE_BATTERY, "Replace battery",
                     "UPS reports RB (replace battery) -- battery voltage "
                     "%sV, charge %s%%. Rare, but runtime estimates go "
                     "unreliable until it's swapped.%s"
@@ -144,6 +179,51 @@ def _battery_flags(prev, curr, ts):
                        _n(_g(curr, "ups", "charge")), ep_suffix(curr)),
                     "high", ["battery", "warning"], ts))
     return out
+
+
+def _overload(prev, curr, ts):
+    """OVER: the load is beyond what the UPS will carry. Critical on either
+    supply -- on battery it can drop the output, on mains it can trip. Only
+    a readable UPS can assert it (ups_flag is None otherwise)."""
+    if not _g(curr, "ups", "ok"):
+        return []
+    if (ups_flag(curr, "overload", "OVER") is True
+            and ups_flag(prev, "overload", "OVER") is not True):
+        meta = events.meta(events.UPS_OVERLOAD)
+        return [(events.UPS_OVERLOAD, meta["label"],
+                 "UPS reports OVERLOAD -- load %s%% (~%s W). It may cut its "
+                 "output to protect itself; shed load now.%s"
+                 % (_n(_g(curr, "ups", "load_pct")), _n(_g(curr, "ups", "watts")),
+                    ep_suffix(curr)),
+                 meta["priority"], meta["tags"], ts)]
+    return []
+
+
+_VERDICT_TEXT = {
+    events.SELF_TEST_PASSED: "UPS battery self-test passed",
+    events.SELF_TEST_WARNING: ("UPS battery self-test ended with a warning or "
+                               "was aborted -- run it again later; a repeat "
+                               "points at an ageing pack"),
+    events.SELF_TEST_FAILED: ("UPS battery self-test FAILED -- the pack may "
+                              "not carry the load in an outage; plan a "
+                              "replacement"),
+}
+
+
+def _self_test_result(prev, curr, ts):
+    """The verdict of a self-test, on the "In progress" -> final edge of
+    ups.test_result (events.self_test_verdict). One push per test; the start
+    is routine and silent."""
+    result = _g(curr, "ups", "test_result")
+    kind = events.self_test_verdict(_g(prev, "ups", "test_result"), result)
+    if not kind:
+        return []
+    meta = events.meta(kind)
+    return [(kind, meta["label"],
+             "%s (UPS says: %s). Battery %sV, charge %s%%.%s"
+             % (_VERDICT_TEXT[kind], result, _n(_g(curr, "ups", "batt_v")),
+                _n(_g(curr, "ups", "charge")), ep_suffix(curr)),
+             meta["priority"], meta["tags"], ts)]
 
 
 def _services(prev, curr, ts):
@@ -166,7 +246,7 @@ def _services(prev, curr, ts):
         if not isinstance(p_entry, dict) or not isinstance(c_entry, dict):
             continue
         if p_entry.get("healthy") is True and c_entry.get("healthy") is False:
-            out.append(("service_died", "Power-chain service died",
+            out.append((events.SERVICE_DIED, "Power-chain service died",
                         ("systemd unit %s is unhealthy (active=%s, "
                          "result=%s)."
                          % (unit, c_entry.get("active"), c_entry.get("result"))),
@@ -190,7 +270,10 @@ def transitions(prev, curr):
         out += _hibernate_imminent(prev, curr, ts)
         out += _box_woke(prev, curr, ts)
         out += state_events(prev, curr, ts)
+        out += park_events(prev, curr, ts)
         out += _battery_flags(prev, curr, ts)
+        out += _overload(prev, curr, ts)
+        out += _self_test_result(prev, curr, ts)
         out += _services(prev, curr, ts)
         return out
     except Exception:

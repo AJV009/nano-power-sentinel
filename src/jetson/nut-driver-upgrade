@@ -1,0 +1,91 @@
+#!/bin/bash
+# nut-driver-upgrade -- swap ONLY the UPS driver to a NUT master build.
+#
+# WHY: the distro driver (2.7.4) never recovers from a stall -- the 2026-09-20
+# incident sat at "Data stale" for 9 minutes (docs/UPS-TOOLING.md s2). NUT
+# 2.8.5+ reconnects when a poll gets zero answers, can change its debug level
+# at runtime (upsrw -s driver.debug=N), and master maps shutdown.return onto
+# the 0x40 reboot register this unit actually has.
+#
+# WHAT STAYS: the distro upsd, upsmon, upsc and upscmd (2.7.4). The
+# driver<->upsd socket protocol is backward compatible, and the socket name
+# is unchanged. Keep 2.8-only keys out of /etc/nut/ups.conf so a rollback to
+# the 2.7.4 driver still parses it.
+#
+# Build first (as the normal user, no root):  ~/build/build-nut.sh
+# That configures --prefix=/opt/nut-master --with-drvpath=/opt/nut-master/driver
+# with statepath/pidpath /run/nut and user nut, i.e. the distro layout.
+#
+# Usage:  sudo nut-driver-upgrade [install|rollback|status]
+set -euo pipefail
+
+SRC=${SRC:-/home/jetson/build/nut}
+PREFIX=/opt/nut-master
+DROPIN_DIR=/etc/systemd/system/nut-driver.service.d
+DROPIN=$DROPIN_DIR/driver-master.conf
+
+say() { echo "[nut-driver-upgrade] $*"; }
+
+status() {
+  say "driver: $(upsc apc driver.version 2>/dev/null || echo '?') \
+(internal $(upsc apc driver.version.internal 2>/dev/null || echo '?'))"
+  say "status: $(upsc apc ups.status 2>/dev/null || echo unreadable)"
+  [ -f "$DROPIN" ] && say "drop-in: $DROPIN (master driver active)" \
+                   || say "drop-in: none (distro driver active)"
+}
+
+wait_readable() {
+  for _ in $(seq 1 20); do
+    upsc apc ups.status >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
+}
+
+install_master() {
+  [ -x "$SRC/drivers/usbhid-ups" ] || { say "no build at $SRC -- run build-nut.sh first"; exit 1; }
+  if upsc apc ups.status 2>/dev/null | grep -qw OB; then
+    say "REFUSING: the UPS is on battery. Swap drivers only on mains."; exit 1
+  fi
+  install -d -m 755 "$PREFIX/driver" "$PREFIX/sbin"
+  install -m 755 "$SRC/drivers/usbhid-ups" "$PREFIX/driver/usbhid-ups"
+  install -m 755 "$SRC/drivers/upsdrvctl" "$PREFIX/sbin/upsdrvctl"
+  install -d -m 755 "$DROPIN_DIR"
+  cat > "$DROPIN" <<'EOF'
+# Run the NUT master usbhid-ups driver instead of the distro 2.7.4 one.
+# Installed by nut-driver-upgrade; remove this file (daemon-reload + restart
+# nut-driver) to roll back. See docs/UPS-TOOLING.md s5.
+[Service]
+ExecStart=
+ExecStart=/opt/nut-master/sbin/upsdrvctl start
+ExecStop=
+ExecStop=/opt/nut-master/sbin/upsdrvctl stop
+EOF
+  systemctl daemon-reload
+  systemctl restart nut-driver
+  if wait_readable; then
+    say "master driver is up"
+  else
+    say "master driver did NOT come up -- rolling back"; rollback; exit 1
+  fi
+  # upsd keeps its old socket session only until it notices; a restart makes
+  # the variable list (new driver.* keys) visible straight away.
+  systemctl restart nut-server
+  wait_readable || true
+  status
+}
+
+rollback() {
+  rm -f "$DROPIN"
+  systemctl daemon-reload
+  systemctl restart nut-driver
+  wait_readable && systemctl restart nut-server || true
+  status
+}
+
+case "${1:-status}" in
+  install)  install_master ;;
+  rollback) rollback ;;
+  status)   status ;;
+  *) echo "usage: $0 [install|rollback|status]"; exit 2 ;;
+esac

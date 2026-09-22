@@ -7,6 +7,8 @@ never raises (`_g` is the one thing every caller leans on to survive a
 malformed or partial snapshot without a try/except at every call site).
 """
 
+from . import states
+
 
 def _g(d, *keys):
     """Safe nested get -- returns None on any missing key or non-dict hop."""
@@ -48,3 +50,32 @@ def ups_line(curr):
     charge = _g(curr, "ups", "charge")
     runtime = _g(curr, "ups", "runtime")
     return "Charge %s%%, runtime %s." % (_n(charge), _fmt_secs(runtime))
+
+
+def ups_flag(snap, key, flag):
+    """A tri-state UPS boolean: `ups[key]` (upsblock's True/False/None),
+    or -- from a snapshot built before that key existed -- the raw flag, and
+    only while the UPS is readable. An unreadable read reports flags=[],
+    which must never read as "the flag cleared"."""
+    ups = _g(snap, "ups")
+    if not isinstance(ups, dict):
+        return None
+    if key in ups:
+        return ups.get(key)
+    return (flag in (ups.get("flags") or [])) if ups.get("ok") else None
+
+
+def park_phase(snap):
+    """snap["park"]["phase"] (park.py): "armed" / "parked" / "returning" /
+    None. A parked UPS goes silent and a parked box powers itself on -- both
+    on purpose -- so a few alerts need to know."""
+    return _g(snap, "park", "phase")
+
+
+def testing(snap):
+    """states.self_test_explains() for a whole snapshot: is a battery
+    self-test the explanation for any OFF / OB it shows."""
+    if not isinstance(snap, dict):
+        return False
+    return states.self_test_explains(snap.get("self_test"),
+                                     snap.get("ups_cut"), snap.get("ups"))

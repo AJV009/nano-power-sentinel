@@ -13,9 +13,9 @@ import queue
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import actions
 from . import config as cfgmod
-from . import control
-from . import hold, states, upsoff
+from . import upsops
 
 HEARTBEAT = 15.0
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -176,6 +176,9 @@ def make_handler(collector, store):
                     "baseline": cfgmod.BASELINE,
                     "files": {"jetson": cfgmod.read_local(),
                               "box": cfgmod.read_box(collector.box.base)},
+                    "ups_settings": upsops.describe(
+                        (collector.snapshot() or {}).get("ups")),
+                    "ups_baseline": upsops.UPS_BASELINE,
                 })
 
             if route.startswith("/api/"):
@@ -192,58 +195,12 @@ def make_handler(collector, store):
                 body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
             except Exception:
                 body = {}
-            override = bool(body.get("override"))
             action = route.rsplit("/", 1)[1]
-
-            refusal = control.interlock(collector, override)
-            if refusal:
-                return self._json(409, {"error": refusal, "interlocked": True})
-
-            if action == "wake":
-                # Waking it by hand ends the manual shutdown.
-                hold.clear_hold()
-                ok, detail = control.magic_packet()
-                store.add_event(time.time(), states.MANUAL_WAKE, collector.episodes.id,
-                                {"ok": ok, "detail": detail, "override": override})
-                return self._json(200 if ok else 500,
-                                  {"ok": ok, "detail": detail})
-
-            if action == "hibernate":
-                # Declare intent BEFORE acting: the box may vanish within a
-                # second, and an unattributed disappearance gets reported as
-                # an unexplained failure rather than something you did.
-                collector.cause.declare_intent(
-                    states.CAUSE_MANUAL_HIBERNATE, time.time())
-                # And tell the sentinel: you switched it off on purpose, so
-                # the next outage recovery must not switch it back on.
-                hold.set_hold("hibernated from the dashboard")
-                store.add_event(time.time(), states.MANUAL_HIBERNATE,
-                                collector.episodes.id, {"override": override})
-                ok, detail = control.box_hibernate(collector.box.base)
-                return self._json(200 if ok else 502,
-                                  {"ok": ok, "detail": detail})
-
-            # Switching the UPS output off is the one action here with no
-            # software undo, so it lives behind a typed confirmation phrase
-            # and a cancellable delay. See upsoff.py for the full reasoning.
-            if action == "reset-config":
-                result, code = cfgmod.reset(collector.box.base,
-                                            collector.tunables)
-                if code == 200 and result.get("applied"):
-                    store.add_event(time.time(), states.CONFIG_CHANGE,
-                                    collector.episodes.id,
-                                    dict(result["applied"], reset=True))
-                return self._json(code, result)
-
-            if action == "ups-off":
-                result, code = upsoff.request(collector, store, body)
-                return self._json(code, result)
-
-            if action == "ups-abort":
-                result, code = upsoff.abort(collector, store)
-                return self._json(code, result)
-
-            return self._json(404, {"error": "unknown action", "action": action})
+            # The dispatch itself (interlock, each action's behaviour) lives
+            # in actions.py -- moved there so this file stays under the
+            # 300-line cap. See actions.py for the full action list.
+            payload, code = actions.handle(action, body, collector, store)
+            return self._json(code, payload)
 
         def do_PUT(self):
             if self.path.rstrip("/") != "/api/config":

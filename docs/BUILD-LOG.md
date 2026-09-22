@@ -1577,3 +1577,358 @@ also never been mirrored; `pull-state.sh` now captures it.
 
 **Undo:** the pre-fix sentinel is at `/usr/local/sbin/ups-sentinel.pre-hold-*`
 on the jetson. Removing `/var/lib/ups-dash/wake-hold` lifts a hold by hand.
+
+---
+
+## 2026-09-22 — UPS tooling: research, bench tests, driver upgrade
+
+Full research write-up, with evidence levels: [UPS-TOOLING.md](UPS-TOOLING.md).
+This entry is what was **done**.
+
+### Two earlier conclusions were wrong
+
+**1. `pollinterval = 1` did not "kill the HID interface".** The kernel log shows
+**no USB disconnect** at 16:06 on 09-20. The UPS stayed on the bus and stopped
+answering: a stall. NUT 2.7.4 never recovers from a stall, so upsd said
+"Data stale" for 9 minutes until the driver was restarted by hand. The faster
+polling may have provoked the stall. The missing recovery is what made it
+fatal.
+
+**2. `/dev/hidraw1` "vanishing" was normal.** `usbhid-ups` detaches the kernel
+HID driver when it claims the UPS, so the APC *never* has a hidraw node while
+NUT is healthy. It only reappeared at 16:22:06, in the second between the UPS
+re-enumerating and NUT reclaiming it.
+
+That also made the dashboard's **UPS USB link** check meaningless. It listed
+`/dev/hidraw*`, and the only node is `hidraw0` — the touchscreen. It now reads
+sysfs: vendor 051d, interface driver `usbfs` = held by NUT.
+
+### The live data was a 30-second staircase
+
+Across 7,077 stored 1 Hz samples, load, input voltage, runtime and battery
+voltage changed only every 31–33 s. `pollinterval` refreshes the status bits
+and timers. Everything else follows `pollfreq`, which defaults to 30.
+
+Set `pollfreq = 10` in `/etc/nut/ups.conf`. The driver's own debug log now
+shows full updates **12 s apart** (10 s rounded up to the 2 s tick).
+Backup: `/etc/nut/ups.conf.bak-pollfreq-20260922`.
+
+### HID descriptor captured
+
+A 30 s driver stop on mains, then `usbhid-ups -DDD`. Saved to
+`private/research/apc-dump-274.txt`. It confirms three shutdown registers —
+0x15 (stay off), 0x40 (reboot), 0x41 (apcupsd's hibernate) — and **no startup
+register**.
+
+### Bench tests (nothing plugged into the UPS)
+
+`scripts/ups-bench-test.sh`, run by the operator:
+
+| # | Test | Result |
+|---|---|---|
+| 1 | `shutdown.reboot 1` on mains | Cut after ~62 s, off ~4 s, **back on by itself** |
+| 2 | `shutdown.reboot 1` from `OL OFF` | Never armed — **no remote power-on exists** |
+| 3 | `shutdown.reboot 1` on battery | Cut after ~60 s, **back on ~1 s after mains returned**, no loop |
+
+So `load.off` and `shutdown.reboot` are two different tools:
+
+- **`load.off`** cuts and stays off. The emergency modes rightly keep it.
+- **`shutdown.reboot 1`** cuts and comes back.
+
+A dashboard "restore output" button was built behind a flag pending test 2,
+then deleted once test 2 proved it impossible.
+
+### Permissions widened, by the operator
+
+`src/jetson/grant-ups-ops` added the following to the `killer` NUT user:
+
+- `shutdown.reboot`, `shutdown.return`
+- `beeper.*`
+- `test.battery.start.quick` / `.stop`
+- `SET`
+
+The deep test is deliberately excluded. The permission classifier refused to
+make this change itself, which is correct for a permission grant, so the
+operator ran it. Backup: `/etc/nut/upsd.users.bak-ops-20260922-004336`.
+
+### Driver upgraded to NUT master (2.8.5.1-dev, a66c009)
+
+- **Build.** `scripts/build-nut-master.sh` builds on the jetson.
+  `src/jetson/nut-driver-upgrade install` places it in `/opt/nut-master` and
+  adds a `nut-driver.service` drop-in.
+- **Driver only.** The distro 2.7.4 upsd and upsmon stay.
+- **Gains:**
+  - stall recovery;
+  - `driver.debug` settable at runtime;
+  - **`shutdown.return`**, mapped to exactly the 0x40 = 1 write the bench
+    tests proved.
+- **Rollback:** `sudo nut-driver-upgrade rollback`.
+
+### Stall watchdog
+
+New unit `nut-stall-watchdog`. It restarts `nut-driver` after 20 s of
+"Data stale", but only while the UPS is still on the USB bus, and at most
+once per 2 minutes.
+
+It is the outer layer over the new driver's own recovery. The goal is that
+recovery lands well before the governor's 45 s blind-on-battery failsafe.
+
+### Dashboard
+
+- **Why it went to battery.** `input.transfer.reason`, trusted only one full
+  poll after the edge. It is recorded once per outage and quoted in "Mains
+  restored".
+- **Self-test.** A button, guarded: mains, ≥ 90 % charge, nothing pending.
+  - New `self_test` state.
+  - Pass, warning and fail pushes.
+  - The OFF/OB flicker of *any* self-test, including the UPS's automatic
+    ones, no longer fires the critical OUTPUT OFF alert.
+- **UPS firmware settings** on CONFIG:
+  - sensitivity, and the UPS's own low-battery charge and runtime points;
+  - each write is verified by reading it back;
+  - transfer voltages are read-only on purpose;
+  - a beeper control that is not interlocked, because you need mute mid-outage.
+- **Countdowns.** The emergency cut shows the UPS's **own** countdown, as
+  proof it armed.
+- **Readiness.** It now shows the real USB link, a replace-battery flag, the
+  last self-test result, and the driver version with its poll cadence.
+
+### Verified live
+
+Checked against the running service:
+
+- USB link reports `held by NUT on port 1-2.4`.
+- The self-test is refused at 77 % charge.
+- A same-value `input.sensitivity` write comes back `verified: true`.
+- A transfer-point write is refused as non-editable.
+- `upscmd -l` now lists `shutdown.return`.
+
+---
+
+## 2026-09-22 — Bench test 4, new thresholds, and a deploy slip
+
+### Test 4: the UPS parks on battery without draining
+
+The wall plug was pulled, `shutdown.reboot 1` was sent, and mains was kept
+out for 7 min 41 s after the cut:
+
+```
+16:01:08  armed (timer.reboot 1)      chg 100  -- the idle inverter alone then
+16:02:09  OB OFF  (cut, +61 s)        chg  94     took 6 points in one minute
+16:02:38  usb:GONE                    the UPS switched its own electronics off
+16:09:51  usb:up    (mains back)
+16:09:54  OL CHRG   output restored   chg  94  -- no drain at all while parked
+```
+
+- **The new driver reconnected by itself** within 2 s.
+- **The stall watchdog logged** "not on the USB bus — not restarting", which
+  is correct.
+
+This is what makes a battery-floor park worth building: parked, the pack holds.
+
+### Thresholds raised (operator's call)
+
+| Setting | Was | Now | Where |
+|---|---|---|---|
+| Hibernate reserve | 30 % | 50 % | `hibernate-governor` default + `BASELINE`. **Live value not yet written:** the box is off, so it applies next time it is up. |
+| Wake gate | 50 % | 70 % | `ups-sentinel` default + `BASELINE`, and live in `/etc/ups-dash/tunables.json` |
+| Floor (planned park) | — | 35 % | design default |
+
+### ⚠ Deploy slip: the sentinel briefly targeted the placeholder box
+
+To ship the new wake default, `src/jetson/ups-sentinel` was copied straight
+into `/usr/local/sbin`. The repo copy is **sanitised**, so for ~3 minutes the
+live sentinel targeted `10.0.0.20 / aa:bb:cc:dd:ee:ff`. Its own startup line
+gave it away.
+
+- **Fix:** re-rendered with `install.sh`'s substitution and diffed against the
+  previous live copy. The only difference is `WAKE_CHARGE_PCT`.
+- **No effect:** the box was hibernated under a wake hold and mains was
+  present, so no wake was due.
+- ⚠ **Never copy `src/jetson/*` onto the jetson raw.** Use
+  `scripts/install.sh jetson`, or the same `render` sed. The scripts carry
+  documentation-range placeholders by design.
+
+---
+
+## 2026-09-22 — Battery-floor park + power-on guard
+
+With the box hibernated, the pack still drained **23–55 %/h**; tonight's
+outage ended at 21 %. Test 4 showed that a parked UPS holds its charge with
+zero drain. So once the box is down and the outage continues, the UPS now parks.
+
+### How it works
+
+1. **Outage.** The box hibernates at the reserve (now 50 %).
+2. **Floor.** Still on battery at the floor (default 35 %), with the box
+   down and the UPS load ≤ 3 % for 60 s, ups-dash sends
+   **`shutdown.reboot 1`**. That is the exact command bench-proven on this
+   unit *and* this driver. `shutdown.return` is only the fallback.
+3. **Parked.** About 60 s later the output cuts, and about 30 s after that
+   the UPS switches itself off. The pack holds. The dashboard shows
+   **PARKED**, not "UPS unreadable".
+4. **Mains back.** Output returns in ~3 s. With BIOS **AC BACK = Always
+   On**, the box powers itself on and resumes.
+5. **Guard.** If the box powers on within 10 min of the output returning
+   and should not be up (below the wake gate, mains not yet stable, or a
+   wake hold), ups-dash declares an *outage* intent and hibernates it again.
+   This time the box has standby power, so its NIC is armed.
+6. **Wake.** The sentinel's normal gate (70 %, mains stable) sends WoL.
+
+The **sentinel never cuts power**; ups-dash owns the park, as with the wake
+hold. The sentinel only reads `/var/lib/ups-dash/park`. While a park story
+is in progress it neither stands down for the self-powered box nor wakes
+it. The marker is honoured for 30 min after mains returns, so a crashed
+ups-dash cannot block recovery forever.
+
+⚠ **Without the marker read, the old sentinel would strand the box.** It
+saw the self-powered box as "back", stood down with `outage_seen=False`, and
+never woke it after the guard put it to sleep. Test F reproduces this:
+it fails on the old sentinel (0 WoL) and passes on the new one.
+
+### Edges handled
+
+| Case | Behaviour |
+|---|---|
+| Box still awake at the floor | never parked, since the cut would hard-kill it; one `ups_park_skipped` alert |
+| Mains returns inside the 60 s grace | the cut still fires, because a 0x40 arm cannot be cancelled; the guard handles the power-on |
+| Command refused | `park_failed`, one retry per 5 min |
+| Box never powers on (AC BACK not Always On) | after 10 min, "press its power button". WoL cannot reach a box that lost standby power. |
+| Hold present when parked | always re-hibernated; the hold survives the power-on |
+| ups-dash down | no park, which is the old behaviour |
+
+### Operator TODO
+
+**BIOS → AC BACK → Always On.** Until this is set, a park ends with a box
+that needs its power button.
+
+### Also fixed on the way
+
+- **"HIBERNATING NOW" all outage.** The state showed "HIBERNATING NOW" for
+  the whole outage once the charge was below the reserve, even with the box
+  already down. That hid OUTAGE_DOWN.
+- **CONFIG showed stale values.** The learner follows the journal from "now",
+  so a sentinel that started before ups-dash was never seen, and CONFIG fell
+  back to stale defaults (50 %, while the sentinel ran 70 %). Its defaults
+  now mirror the compiled ones, and until a sentinel log line is seen the
+  sentinel keys come from the same file the sentinel loads.
+
+---
+
+## 2026-09-22 — "It comes up and goes straight back down": a governor bug
+
+### Symptom
+
+The box woke three times today (17:52, 18:50, and one Wake-on-LAN at 20:43).
+Each time it went dark again within about 2 minutes, never answering on the
+network. The dashboard's UPS-load history showed it plainly: 10–51 % for a
+couple of minutes, then 0 %.
+
+### Cause: time asleep was counted as time blind
+
+The box's log at the WoL wake:
+
+```
+20:44:03  upsmon: Processing OS wake-up after sleep
+20:44:07  hibernate-governor: HIBERNATING - on battery and blind to the UPS for 78788s
+20:44:08  PM: hibernation: hibernation entry          <- 4 s after resuming
+```
+
+- **How the stale state got there.** The dashboard had hibernated the box
+  during last night's outage. The governor's loop was frozen mid-state:
+  "on battery", last good read ~22 h earlier.
+- **What happened on resume.** The network was not up yet (`Network is
+  unreachable`). 78,788 s blind is far past the 45 s comms-loss failsafe, so
+  it re-hibernated the box instantly.
+- **Why the fifth wake stuck.** The governor had hibernated the box *itself*
+  that time, which resets its state.
+
+### Fix
+
+`RESUME_GAP_SEC` / `RESUME_GRACE`. When a loop gap over 60 s shows the
+machine was asleep, the blind clock restarts at wake-up, and the network gets
+90 s before the failsafe may fire. A virtual-clock harness proves three
+things:
+
+| Case | Old code | Fixed code |
+|---|---|---|
+| Asleep 22 h, network back in 8 s | re-hibernates at 0 s | stays up |
+| Asleep, network never returns | — | still hibernates, 90 s after waking |
+| Classic blind-on-battery, no sleep | fires at 45 s | fires at 45 s, unchanged |
+
+Installed on the box after a diff against the live copy. Backup:
+`/usr/local/sbin/hibernate-governor.pre-resume-fix-20260922`.
+
+⚠ **This also mattered for the park.** Every AC-BACK power-on after a park
+would have tripped exactly this and re-hibernated before ups-dash's guard
+ever saw the box. The park's timing only looked right by accident.
+
+### Also on the box tonight
+
+- **Reserve 50 % applied.** The box's own tunables file pinned 30 %, so it
+  was set through the dashboard's validated `PUT /api/config`. The governor
+  logged `reserve_pct 30 -> 50`.
+- **`upssched-cmd` was lying.** It logged "GPU capped 150W, inference
+  stopped; hibernate in 60s" on a box with no `rocm-smi`, no
+  `inference.service`, and no 60 s timer since 09-20. It now logs what it did
+  ("no GPU cap (rocm-smi not installed), no inference.service"). The actions
+  stay, guarded, for when ROCm is installed. The script is now in the repo as
+  `src/box/nut/upssched-cmd`; it was never there before.
+- **Mouse moved but clicks were ignored after the resume.** X itself was fine:
+  a screenshot showed a live desktop. The window manager (xfwm4) was holding
+  a stale input grab after the GPU reset that happens on resume.
+  `DISPLAY=:0 xfwm4 --replace` released it; windows survive.
+
+---
+
+## 2026-09-22 — The state ledger
+
+Design and trade-offs: [LEDGER.md](LEDGER.md).
+
+In short, one file per writer:
+
+- **`/var/lib/ups-dash/ledger/dash.json`** (ups-dash, persistent, written on
+  change) replaces the `wake-hold`, `park` and `park-outcome` marker files.
+- **`/run/ups-sentinel/state.json`** (the sentinel, tmpfs, written on change
+  + a 30 s heartbeat) replaces scraping the sentinel's log for its state and
+  tunables.
+
+**Two independent deciders stay the rule.** The sentinel reads ups-dash's
+facts fail-safe, and falls back to the legacy files if `dash.json` is absent.
+It never takes a decision from ups-dash's classifier, and it no longer
+deletes anything it does not own. The stale-hold valve moved to ups-dash.
+
+### What changed
+
+- **The sentinel is two files:** `ups-sentinel` plus `ups_sentinel_io.py`.
+  Each file is at or under 300 lines. The unit gains
+  `RuntimeDirectory=ups-sentinel` (0755).
+- **ups-dash gains** `ledger.py`, `ledger_peer.py` and `ledger_tick.py`.
+  `hold.py`, `park_io` and `cause.py` now sit on the ledger with their APIs
+  unchanged.
+- **CONFIG shows the sentinel's actual running values.** They are read from
+  its published state, so the "50 % shown, 70 % running" class of bug is
+  gone.
+- **Recovery text quotes the sentinel's live gate**, e.g. "sentinel
+  holding: 42 / 70 % · mains 60 / 120 s".
+- **Readiness has "Sentinel is publishing"**: the heartbeat is fresh and the
+  pid is alive.
+- **The browser renders `snap.view`** instead of re-deriving self-test and
+  park modes.
+
+### Tests
+
+- **Sentinel: 16/16.** The old code fails the six new scenarios, including
+  "a corrupt `dash.json` must not wake a held box" and "a stale hold is
+  ignored, not deleted".
+- **ups-dash:** `test_cause`, plus a 38-check end-to-end ledger run and every
+  park, self-test and collector verifier.
+
+### Deployed in order
+
+1. **Sentinel**, rendered, installed as a pair with its unit, then
+   daemon-reload. Its published state immediately showed the true 70 % /
+   10 s.
+2. **ups-dash.** It created `dash.json` (no legacy files were left to
+   migrate). `sentinel_status` is `fresh`, and CONFIG's source reads
+   "sentinel: ups-sentinel state".

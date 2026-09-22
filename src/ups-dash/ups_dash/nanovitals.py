@@ -9,6 +9,10 @@ import glob
 import os
 import re
 
+# APC's USB vendor ID. The one fact _ups_link() needs to find the device
+# among whatever else is on the bus.
+UPS_VENDOR_ID = "051d"
+
 
 def _read(path):
     try:
@@ -90,14 +94,40 @@ def _power_mode():
 
 
 def _ups_link():
-    """Is the APC still enumerated? During the pollinterval=1 incident the HID
-    interface vanished while lsusb still listed the device, so presence of a
-    hidraw node is the honest check."""
+    """Is the APC enumerated, and is NUT the one holding it?
+
+    This used to list /dev/hidraw*. That was wrong: the jetson's only hidraw
+    node is hidraw0, the TOUCHSCREEN (hid-multitouch) -- so the check always
+    read healthy, even with the UPS unplugged. The APC itself never has a
+    hidraw node while NUT holds it: usbhid-ups detaches the kernel HID driver
+    on claim, so the device shows up as a USB interface bound to the "usbfs"
+    driver instead of hid-generic/usbhid (see docs/UPS-TOOLING.md §2, the
+    2026-09-20 stall incident, for the evidence this was re-read from).
+
+    The honest check is sysfs: find the device by idVendor and read which
+    driver its interface is bound to.
+      present=False           -- no device with this vendor ID on the bus
+      driver == "usbfs"        -- NUT holds it (healthy)
+      driver in (None, other)  -- on the bus but NUT is not attached to it
+    """
     try:
-        nodes = sorted(n for n in os.listdir("/dev") if n.startswith("hidraw"))
-        return {"hidraw": nodes, "present": bool(nodes)}
+        for dev in sorted(glob.glob("/sys/bus/usb/devices/*")):
+            base = os.path.basename(dev)
+            if ":" in base:
+                continue          # an interface subdir, not a device
+            if _read(os.path.join(dev, "idVendor")) != UPS_VENDOR_ID:
+                continue
+            driver = None
+            try:
+                link = os.path.join(dev, "%s:1.0" % base, "driver")
+                driver = os.path.basename(os.readlink(link))
+            except Exception:
+                driver = None
+            return {"present": True, "port": base, "driver": driver,
+                    "held": driver == "usbfs"}
+        return {"present": False, "port": None, "driver": None, "held": None}
     except Exception:
-        return {"hidraw": [], "present": None}
+        return {"present": None, "port": None, "driver": None, "held": None}
 
 
 def collect():

@@ -12,39 +12,59 @@ through an outage and is the sole authority on when the box may come back.
 Why the gate: if mains is flapping, waking the box immediately would burn a
 hibernate/resume cycle on a pack that never recharges, and eventually there
 would not be enough battery left to finish writing an image - a hard power
-loss mid-hibernate. Waiting for 50% both proves mains is genuinely back and
+loss mid-hibernate. The gate both proves mains is genuinely back and
 guarantees the next outage can be survived.
 
-KILLPOWER IS DELIBERATELY ABSENT. Verified 2026-09-20: this UPS latches its
-output off after load.off.delay and reports "OL OFF" on mains return, waiting
-for a human to press its front-panel button. There is no load.on command.
-Cutting the load would strand the box with no +5VSB, so WoL could not rescue
-it either. Do not re-add it.
+THIS PROCESS NEVER CUTS POWER. load.off latches the output OFF until a human
+presses the UPS button (2026-09-20). The battery-floor PARK (shutdown.reboot 1,
+which restores itself when mains returns -- bench tests 3/4, 2026-09-22) is
+owned by ups-dash, like the wake hold: after a park the box powers itself on
+with the mains (BIOS AC BACK) and ups-dash puts it back to sleep, so here that
+box must neither stand us down nor be woken while the park story runs.
+
+THE LEDGER (docs/LEDGER.md) is how this process learns the hold and the park.
+It READS ups-dash's /var/lib/ups-dash/ledger/dash.json (the legacy wake-hold /
+park files until that exists), PUBLISHES only its own /run/ups-sentinel/
+state.json, and never writes or deletes anything of ups-dash's. TWO
+INDEPENDENT DECIDERS: it must still recover the box with ups-dash dead or
+wrong, so it never imports ups-dash or takes a decision from its classifier,
+and a missing or broken ledger only falls back to the rules below, fail-safe.
 """
-import os, socket, subprocess, time
+import os, sys, time
 
-UPS               = "apc@localhost"
-BOX_IP            = "10.0.0.20"
-BOX_MAC           = "aa:bb:cc:dd:ee:ff"
-BROADCAST         = "10.0.0.255"
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+sys.dont_write_bytecode = True          # no __pycache__ in /usr/local/sbin
+# I/O edges + site values (UPS, BOX_IP, BOX_MAC, BROADCAST): ups_sentinel_io.py,
+# installed alongside. Called by bare name so tests can replace them here.
+from ups_sentinel_io import (BOX_IP, BOX_MAC, apply_tunables, box_up,  # noqa: E402
+                             log, mtime, read_json, send_wol, ups_charge,
+                             ups_status, write_json)
 
-WAKE_CHARGE_PCT   = 50.0    # pack must be at least this full before waking the box
+WAKE_CHARGE_PCT   = 70.0    # pack must be at least this full before waking the box
 MAINS_STABLE_SEC  = 120.0   # ...and mains must have held this long, uninterrupted
 WAKE_TRIES        = 5
 WAKE_INTERVAL     = 30.0
 POLL              = 5.0
 REPORT_EVERY      = 30.0
 
-# A human put the box down on purpose (dashboard Hibernate, or an emergency
-# shutdown). ups-dash writes and clears this file; the sentinel only reads it.
-# Not a tunable -- it is an instruction, not a threshold.
+# ups-dash's facts, READ here and never written (legacy WAKE_HOLD/PARK_MARKER
+# while LEDGER_FILE does not exist). The wake hold: a human put the box down on
+# purpose. Not a tunable -- it is an instruction, not a threshold.
+LEDGER_FILE       = "/var/lib/ups-dash/ledger/dash.json"
 WAKE_HOLD         = "/var/lib/ups-dash/wake-hold"
 HOLD_STALE_SEC    = 3600.0  # a hold this old with the box up has plainly ended
-# How long to keep waiting after the LAST magic packet before declaring the
-# wake failed. A resume from a multi-GB image took ~49s on 2026-09-21; with
-# short retry intervals the sentinel used to give up while it was still
-# resuming, and cried "needs manual attention" two seconds before it came up.
+# How long to wait after the LAST magic packet before declaring the wake
+# failed: a resume from a multi-GB image took ~49s (2026-09-21), and short retry
+# intervals once cried "needs manual attention" two seconds before it came up.
 RESUME_GRACE      = 120.0
+# Battery-floor park, written and removed by ups-dash (park.py).
+# Honoured only for PARK_STALE_SEC after mains returns: if ups-dash died
+# mid-story, a leftover park must not block recoveries forever.
+PARK_MARKER       = "/var/lib/ups-dash/park"
+PARK_STALE_SEC    = 1800.0
+# Our own state.json, for ups-dash: tmpfs, the unit's RuntimeDirectory=.
+RUN_DIR           = "/run/ups-sentinel"
+HEARTBEAT_SEC     = 30.0
 
 
 # ---- dashboard-editable tunables ------------------------------------------
@@ -64,87 +84,75 @@ _TUN_MTIME = [None]
 
 def load_tunables(initial=False):
     """Never raises.  Re-reads only when the file's mtime has moved."""
-    try:
-        mtime = os.stat(TUNABLES_FILE).st_mtime
-    except Exception:
-        return                      # no file is a perfectly normal state
-    if not initial and mtime == _TUN_MTIME[0]:
-        return
-    _TUN_MTIME[0] = mtime
-    try:
-        import json
-        with open(TUNABLES_FILE) as fh:
-            data = json.load(fh)
-        if not isinstance(data, dict):
-            raise ValueError("top level is not an object")
-    except Exception as exc:
-        log("tunables file rejected (%s) - keeping current values" % exc)
-        return
-    g, changed = globals(), []
-    for key, (name, lo, hi) in TUNABLE_SPEC.items():
-        if key not in data:
-            continue
-        try:
-            val = float(data[key])
-        except Exception:
-            log("tunable %s: not a number - ignored" % key)
-            continue
-        if not (lo <= val <= hi):
-            log("tunable %s=%s outside %g..%g - ignored" % (key, val, lo, hi))
-            continue
-        if g[name] != val:
-            changed.append("%s %g -> %g" % (key, g[name], val))
-            g[name] = val
-    if changed:
-        log("tunables reloaded: " + "; ".join(changed))
+    apply_tunables(TUNABLES_FILE, TUNABLE_SPEC, globals(), log, _TUN_MTIME, initial)
 
 
-def log(m):
-    print("[ups-sentinel] " + m, flush=True)
-
-
-def _upsc(var):
-    try:
-        r = subprocess.run(["upsc", UPS, var], capture_output=True, text=True, timeout=10)
-        return r.stdout.strip() if r.returncode == 0 else None
-    except Exception:
-        return None
-
-
-def ups_status():
-    return _upsc("ups.status")
-
-
-def ups_charge():
-    v = _upsc("battery.charge")
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
-
-
-def box_up():
-    return subprocess.run(["ping", "-c1", "-W2", BOX_IP],
-                          stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL).returncode == 0
-
-
+# ---- ups-dash's facts. read_json(): dict | None absent | False unreadable -
 def hold_age():
     """Seconds since the wake hold was placed, or None if there is no hold."""
-    try:
-        return time.time() - os.stat(WAKE_HOLD).st_mtime
-    except Exception:
+    led = read_json(LEDGER_FILE)
+    if led is None:                         # not migrated: the legacy marker
+        placed = mtime(WAKE_HOLD)
+        return None if placed is None else time.time() - placed
+    hold = True if led is False else led.get("hold")
+    if hold is None:
         return None
+    try:
+        return time.time() - float(hold["ts"])
+    except Exception:
+        return 0.0      # present but unreadable counts as held (hold.get_hold)
 
 
-def send_wol():
-    mac = bytes.fromhex(BOX_MAC.replace(":", ""))
-    pkt = b"\xff" * 6 + mac * 16
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    for port in (9, 7):
-        s.sendto(pkt, (BROADCAST, port))
-    s.close()
+def park_phase():
+    """ups-dash's park phase ("armed"/"parked"/"returning"), or None. A park
+    present but unreadable still means a park story: "?"."""
+    led = read_json(LEDGER_FILE)
+    if led is None:                         # not migrated: the legacy marker
+        park = read_json(PARK_MARKER)
+    else:
+        park = False if led is False else led.get("park")
+    if park is None:
+        return None
+    return (park.get("phase") or "?") if isinstance(park, dict) else "?"
+
+
+def ignored(age, stale):
+    """Is this the hold already judged stale? Known by when it was placed."""
+    return stale is not None and abs(time.time() - age - stale) < 1.0
+
+
+def judge_hold(stale):
+    """Box UP only. A hold older than HOLD_STALE_SEC with the box up has plainly
+    ended (ups-dash missed the box coming back) and must not block the NEXT
+    recovery: IGNORED from now on, never deleted. Returns its placement time."""
+    age = hold_age()
+    if age is None or not age > HOLD_STALE_SEC:     # NaN is not stale either
+        return stale
+    if not ignored(age, stale):
+        log("stale wake hold (placed %.1f h ago, the box is up) - ignoring it, "
+            "not deleting it: that is ups-dash's" % (age / 3600.0))
+    return time.time() - age
+
+
+# ---- this process's facts: /run/ups-sentinel/state.json ---------------------
+_PUB = {"facts": None, "at": 0.0, "err": None}
+
+
+def publish(facts):
+    """Write RUN_DIR/state.json (docs/LEDGER.md) on any change, and as a
+    heartbeat. NEVER raises: a report must never cost a recovery. A failed
+    write is retried every pass, logged at most once per 10 min."""
+    now = time.time()
+    try:
+        if facts == _PUB["facts"] and now - _PUB["at"] < HEARTBEAT_SEC:
+            return
+        doc = dict({"schema": 1, "writer": "ups-sentinel", "updated": now}, **facts)
+        write_json(os.path.join(RUN_DIR, "state.json"), doc)
+        _PUB.update(facts=facts, at=now)
+    except Exception as exc:
+        if _PUB["err"] is None or now - _PUB["err"] >= 600.0:
+            _PUB["err"] = now
+            log("cannot publish %s/state.json (%s) - carrying on" % (RUN_DIR, exc))
 
 
 def main():
@@ -159,6 +167,20 @@ def main():
     last_wol    = 0.0
     last_report = 0.0
     last_blind  = 0.0
+    exhausted   = False     # reported only: WoL given up on for this outage
+    stale_hold  = None      # placement time of a hold judged stale (ignored)
+    started     = time.time()
+
+    def pace(deferring=None, gate=None):
+        """End of a pass: publish what it decided, then wait for the next."""
+        publish({"pid": os.getpid(), "started": started, "state": state,
+                 "outage_seen": outage_seen, "ups_status": st, "ol_since": ol_since,
+                 "gate": gate, "wake": {"tries": wake_tries, "max": int(WAKE_TRIES),
+                                        "last_wol": last_wol or None,
+                                        "exhausted": exhausted},
+                 "deferring": deferring, "tunables": {
+                     k: float(globals()[n]) for k, (n, _, _) in TUNABLE_SPEC.items()}})
+        time.sleep(POLL)
 
     while True:
         now = time.time()
@@ -170,7 +192,7 @@ def main():
             if now - last_blind >= 60:
                 log("cannot read the UPS - holding state (this is not 'mains back')")
                 last_blind = now
-            time.sleep(POLL)
+            pace("blind")
             continue
 
         on_batt = "OB" in st.split()
@@ -178,23 +200,24 @@ def main():
         if on_batt:
             if state != "onbatt":
                 # Arm the wake only for a box the OUTAGE actually took down.
-                # A box that was already off when mains failed -- hibernated
-                # by hand, say -- is not an outage casualty, and waking it
-                # afterwards overrules a human decision. That exact thing
-                # happened on 2026-09-21: hibernated at 19:05, woken at 21:06.
+                # One already off (hibernated by hand) is not a casualty, and
+                # waking it overrules a human (2026-09-21: off 19:05, woken 21:06).
                 #
                 # `outage_seen or` matters: if an earlier outage already took
                 # the box down and mains merely flapped, the box is off NOW
                 # because of the outage. Re-deciding from box_up() alone would
                 # disarm the wake and it would never come back.
-                armed = outage_seen or box_up()
+                was_up = not outage_seen and box_up()
+                armed  = outage_seen or was_up
+                if was_up:          # the box is up: judge the hold, as below
+                    stale_hold = judge_hold(stale_hold)
                 log("MAINS LOST (%s) - %s" % (st,
                     "the box hibernates itself via the governor" if armed else
                     "box was already off, so it will NOT be woken afterwards"))
                 state, outage_seen = "onbatt", armed
-                wake_tries, next_wake = 0, 0.0
+                wake_tries, next_wake, exhausted = 0, 0.0, False
             ol_since = None            # any dip restarts the stability window
-            time.sleep(POLL)
+            pace()
             continue
 
         # ---------- mains is present ----------
@@ -203,40 +226,40 @@ def main():
             if state == "onbatt":
                 log("mains restored (%s) - stability window starts now" % st)
 
+        # Park story in progress: the box may power on with the mains and be
+        phase = park_phase()        # ...sent back to sleep by ups-dash.
+        if phase is not None and now - ol_since < PARK_STALE_SEC:
+            if now - last_report >= REPORT_EVERY:
+                log("park recovery (%s) is ups-dash's - not standing down, not "
+                    "waking" % phase)
+                last_report = now
+            pace("park:%s" % phase)
+            continue
+
         if box_up():
             if state != "online":
                 log("box is up and mains is back - standing down")
-            # Safety valve: ups-dash clears the hold when it sees the box come
-            # back, but if ups-dash were down at that moment a stale hold
-            # would block the NEXT genuine outage recovery. An hour of the box
-            # being up means the manual shutdown has plainly ended. (A hold
-            # placed seconds ago is left alone: hibernating takes a while.)
-            age = hold_age()
-            if age is not None and age > HOLD_STALE_SEC:
-                try:
-                    os.remove(WAKE_HOLD)
-                    log("stale wake hold cleared - the box has been up")
-                except Exception:
-                    pass
-            state, outage_seen, wake_tries = "online", False, 0
-            time.sleep(POLL)
+            stale_hold = judge_hold(stale_hold)
+            state, outage_seen, wake_tries, exhausted = "online", False, 0, False
+            pace()
             continue
 
         # box is dark while mains is present
         if not outage_seen:
             # It went down for a reason we did not cause (manual hibernate,
             # maintenance). Not ours to undo.
-            time.sleep(POLL)
+            pace()
             continue
 
         # Guard B: a human put it down DURING the outage. It was up when mains
         # failed, so Guard A armed the wake -- but the outage does not get to
         # overrule somebody deliberately switching the box off.
-        if hold_age() is not None:
+        age = hold_age()
+        if age is not None and not ignored(age, stale_hold):
             if now - last_report >= REPORT_EVERY:
                 log("wake held: the box was put down by hand - not waking it")
                 last_report = now
-            time.sleep(POLL)
+            pace("hold")
             continue
 
         state   = "recovering"
@@ -262,10 +285,12 @@ def main():
                 next_wake = now + WAKE_INTERVAL
             elif now - last_wol >= RESUME_GRACE:
                 log("WoL attempts exhausted - the box needs manual attention")
-                outage_seen = False
+                outage_seen, exhausted = False, True
             # else: packets are sent, the box may still be resuming -- wait.
 
-        time.sleep(POLL)
+        pace(gate={"charge": charge, "need_charge": WAKE_CHARGE_PCT,
+                   "stable_sec": round(stable, 1), "need_stable_sec": MAINS_STABLE_SEC,
+                   "open": c_ok and s_ok})
 
 
 if __name__ == "__main__":

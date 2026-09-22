@@ -3,6 +3,8 @@
   UPS poller   1 Hz   upsd on localhost
   box poller   5 s    box-agent, hard timeout
   journal tail        ups-sentinel + nut-*, read-only
+  state ledger 1 Hz   the sentinel's state.json read; dash.json written on
+                      change only (ledger.py, ledger_tick.py)
 
 Absence of the box is not self-explanatory, so it is correlated with what the
 governor last said: a commanded hibernate reads as "asleep", anything else
@@ -10,19 +12,21 @@ reads as "unreachable".  Two different facts, never merged.
 """
 
 import collections
-import subprocess
 import threading
 import time
 
-from . import derive, nanovitals, nut, upsblock
+from . import derive, ledger, nanovitals, nut, services, upsblock
 from .boxpoll import BoxClient
 from .episodes import EpisodeTracker
 from .journal import JournalTail
 from .notify import Notifier
 from .sample import flatten
 from .tunables import Learner
-from . import hold, settings, states, upsoff
+from . import hold, park_io, settings, states, upsoff
 from .cause import CauseTracker
+from .ledger_tick import LedgerTick
+from .park import ParkTracker
+from .upsextras import UpsExtras
 
 UPS_POLL = 1.0
 BOX_POLL = 5.0
@@ -44,12 +48,27 @@ class Collector(object):
         self.nut = nut.NutClient(ups=ups_name)
         self.box = BoxClient(box_url)
         self.tail = JournalTail(NANO_UNITS)
+        # The state ledger (ledger.py): our facts in dash.json, the
+        # sentinel's in its state file. Loaded, the legacy marker files
+        # folded in, and re-persisted BEFORE anything below reads a hold, a
+        # park or a cause.
+        self.ledger = ledger.default()
+        self.ledger.start()
+        self.ledger_tick = LedgerTick(self.ledger)
         self.learner = Learner()
         self.episodes = EpisodeTracker(store)
-        self.cause = CauseTracker()
+        self.cause = CauseTracker(self.ledger)     # publishes "cause"
+        # Self-test and transfer-cause memory (upsextras.py docstring).
+        self.extras = UpsExtras()
         # A restart must not turn "you cut the power" into "unknown reason":
         # the evidence is in the event log, so read it back.
         self.cause.recover_from_store(store)
+        # Battery-floor park + power-on guard (park.py). Its slow calls run on
+        # a worker thread; it only needs to be told how to reach the box and
+        # how to declare why the box is about to go down.
+        self.park = ParkTracker(store, hibernate=park_io.hibernator(box_url),
+                                declare_intent=self.cause.declare_intent,
+                                ledger=self.ledger)
         # Push notifications. Disabled silently if /etc/ups-dash/notify.json
         # is absent or has no topic, so this is inert until configured.
         self.notifier = Notifier("/etc/ups-dash/notify.json")
@@ -68,40 +87,14 @@ class Collector(object):
 
     @property
     def tunables(self):
-        return self.learner.values
+        """What is in effect: the sentinel's own keys from its heartbeat
+        while fresh, the log/file fallback otherwise (tunables.py)."""
+        return self.learner.live
 
     # ---- polling ------------------------------------------------------
 
     def _poll_services(self):
-        """Health, not just ActiveState.
-
-        A Type=oneshot unit that ran and exited reads "inactive", which is
-        correct rather than broken. Judging on is-active alone produces a
-        permanent false alarm."""
-        out = {}
-        for unit in NANO_UNITS:
-            try:
-                proc = subprocess.run(
-                    ["systemctl", "show", unit, "-p", "ActiveState",
-                     "-p", "Type", "-p", "Result"],
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
-                kv = {}
-                for line in proc.stdout.decode().splitlines():
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        kv[k] = v
-                state = kv.get("ActiveState", "unknown")
-                out[unit] = {
-                    "active": state,
-                    "type": kv.get("Type", ""),
-                    "result": kv.get("Result", ""),
-                    "healthy": state in ("active", "activating")
-                               or (kv.get("Type") == "oneshot"
-                                   and kv.get("Result") == "success"),
-                }
-            except Exception:
-                out[unit] = {"active": "unknown", "healthy": None}
-        self.services = out
+        self.services = services.poll(NANO_UNITS)
 
     def _poll_box(self, now):
         data = self.box.fetch()
@@ -153,6 +146,10 @@ class Collector(object):
             self._poll_box(now)
         if self._due("svc", now, SERVICE_POLL):
             self._poll_services()
+        # The sentinel's facts, read once per tick: None unless its heartbeat
+        # is fresh. Its tunables then win over the log and the file.
+        sentinel = self.ledger_tick.begin(now)
+        self.learner.peer(sentinel)
 
         ups = upsblock.build(self.nut.read())
         box_state, why = self._box_state(now)
@@ -161,9 +158,24 @@ class Collector(object):
             ram_gb = (self._box_data.get("mem") or {}).get("used_gb")
         drain = derive.drain_rate(self.ring, now, ups.get("charge"))
 
+        # Surfaced live so the UI can show a countdown and an abort button
+        # while a scheduled output cut is still cancellable.
+        ups_cut = upsoff.state()
+        # A battery self-test shows OFF / DISCHRG (NUT #2104). `testing` is
+        # the one answer to "does the test explain it" -- classify, derive,
+        # episodes, the cause and the notifier all use the same one.
+        self_test = self.extras.self_test(now, ups, ups_cut, box_state)
+        testing = states.self_test_explains(self_test, ups_cut, ups)
+        on_batt = ups.get("on_battery")
+        if testing and on_batt is True:
+            on_batt = False
+
         # WHY the box is down decides almost everything the user is told, so
-        # attribute it before anything reads the state.
-        down_cause = self.cause.update(now, box_state, ups.get("on_battery"))
+        # attribute it before anything reads the state. The park phase as it
+        # stood before this tick: a box powering itself on after a park is
+        # not "you woke it" (cause.py).
+        down_cause = self.cause.update(now, box_state, on_batt,
+                                       self.park.snapshot(now))
 
         snap = {
             "ts": now,
@@ -180,25 +192,39 @@ class Collector(object):
             "down_cause": down_cause,
             "derived": derive.project(ups, box_state, ups.get("charge"),
                                       ups.get("runtime"), self.tunables,
-                                      ram_gb, drain, down_cause),
+                                      ram_gb, drain, down_cause, testing),
             "tunables": self.tunables,
             "services": self.services,
+            "self_test": self_test,
+            "transfer": self.extras.transfer(now, ups),
         }
 
-        self.episodes.update(now, ups, box_state, ups.get("charge"),
-                             lambda since: self.ring_since(since))
-        snap["episode"] = self.episodes.snapshot(now)
-        # Surfaced live so the UI can show a countdown and an abort button
-        # while a scheduled output cut is still cancellable.
-        snap["ups_cut"] = upsoff.state()
+        snap["ups_cut"] = ups_cut
         snap["wake_hold"] = hold.get_hold()
+        # The park decides only now that the UPS and box readings exist, and
+        # before classify(), so the state line and the marker the sentinel
+        # reads describe the same tick. Never raises; slow calls are async.
+        snap["park"] = self.park.tick(
+            now, ups, box_state, down_cause, ups_cut, testing,
+            snap["wake_hold"], self.tunables, self.episodes.id)
+        self.episodes.update(now, ups, box_state, ups.get("charge"),
+                             lambda since: self.ring_since(since), testing,
+                             snap["park"].get("phase") is not None)
+        snap["episode"] = self.episodes.snapshot(now)
         # The authoritative reading of what is happening. Every piece of
         # user-facing text -- state line, timeline, notifications -- is built
         # from this one call so they cannot drift apart.
         snap["state"] = states.classify(
             ups, box_state, down_cause, self.tunables, snap["episode"],
             snap["ups_cut"], snap["derived"].get("eta_hibernate_sec"),
-            snap.get("wake_hold"))
+            snap.get("wake_hold"), self_test, snap["park"], sentinel)
+        # snap["ledger"], snap["view"] (what the browser renders instead of
+        # re-deriving it), and a stale hold cleared (ledger_tick.py).
+        self.ledger_tick.finish(snap, now, on_batt)
+        # TRANSFER_CAUSE once per outage, and the UPS's own self-test
+        # start/verdict, into the event log. Never raises.
+        self.extras.record(self.store, self._notify_prev, snap,
+                           self.episodes.id, testing, now)
         # Enqueue-only: all network I/O happens on the notifier's own thread,
         # so an unreachable ntfy server can never stall power monitoring.
         try:

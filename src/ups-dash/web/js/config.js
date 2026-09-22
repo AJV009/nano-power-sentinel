@@ -1,22 +1,53 @@
-/* CONFIG -- "what are the thresholds, and what happens if I change them?" */
+/* CONFIG -- "what are the thresholds, and what happens if I change them?"
+
+   Every edit on this tab is STAGED, reviewed, then confirmed:
+
+     control ──> pending store ──> save bar  [ n changes ] [ SAVE ]
+     (pending.js)                  (savebar.js)
+                          SAVE / Reset ──> review popup, current vs new
+                                           (confirm.js)
+                                   Confirm ──> one apply, verdict per row
+                                               (applychanges.js)
+
+   A control writes only to the store; the store's one listener repaints
+   each row in place (text, thumb, pill). The tab is never re-rendered on an
+   edit, and the store lives at module level, so a tab switch or an incoming
+   snapshot cannot wipe an unsaved edit -- snapshots only refresh the live
+   readings underneath it. */
 
 import { get, put, post } from "./api.js";
-import { TIER1, TIER2, TIER3, validate } from "./configdefs.js";
+import { TIER1, TIER2, TIER3 } from "./configdefs.js";
 import { num, dur, isNum, esc } from "./format.js";
+import { createStore } from "./pending.js";
+import { buildCatalog, itemFor, fmtVal, liveTunable, checks, reviewRows,
+         baselinePlan, BEEPER_KEY } from "./catalog.js";
+import { applyAll, settle, heldRows } from "./applychanges.js";
+import { openReview } from "./confirm.js";
+import { saveBarHtml, wireSaveBar } from "./savebar.js";
+import { parkHtml, wireParkConfig } from "./parkconfig.js";
+import { upsFirmwareHtml, wireUpsFirmware, paintReadonly } from "./upsconfig.js";
+import { resetHtml, wireReset } from "./resetcfg.js";
+import { setText, pillSync } from "./cfgdom.js";
 
-let LAST = null;    // latest snapshot, for the live effect preview
-let dirty = {};     // key -> pending value
+let LAST = null;              // latest snapshot, for the live effect preview
+const store = createStore();  // survives re-renders and tab switches
+let view = null;              // the mounted tab: { node, cat, d, plan, syncers, ... }
+let renderSeq = 0;
 
-export function noteSnapshot(snap) { LAST = snap; }
+const mounted = () => !!(view && view.node.isConnected);
 
 /* Effect preview computed with the governor's OWN formula, so the number
-   quoted is the number the governor will actually act on. */
-function effect(def, value, tun) {
+   quoted is the number the governor will actually act on. Shown while the
+   row is pending: "now" is what is in effect, the partner of a pair is
+   read with its own pending edit included. */
+function effect(def, value) {
   if (!LAST || !LAST.ups || !LAST.ups.ok) return "";
   const u = LAST.ups;
   if (def.key === "reserve_pct" && isNum(u.runtime) && isNum(u.charge) && u.charge > 0) {
+    const cur = store.current("reserve_pct");
+    if (!isNum(cur)) return "";
     const at = (r) => u.runtime * (u.charge - r) / u.charge;
-    const d = at(tun.reserve_pct) - at(value);
+    const d = at(cur) - at(value);
     if (Math.abs(d) < 30) return "";
     return `At the present ~${Math.round(u.watts)} W draw, hibernate would fire about ${dur(Math.abs(d))} ${d > 0 ? "sooner" : "later"} than it does now.`;
   }
@@ -36,8 +67,8 @@ function effect(def, value, tun) {
     // up. The sentinel now waits RESUME_GRACE after the last packet, so a
     // short interval is no longer harmful -- this just makes the timing
     // visible instead of surprising.
-    const tries = def.key === "wake_tries" ? value : tun.wake_tries;
-    const every = def.key === "wake_interval_sec" ? value : tun.wake_interval_sec;
+    const tries = def.key === "wake_tries" ? value : store.value("wake_tries");
+    const every = def.key === "wake_interval_sec" ? value : store.value("wake_interval_sec");
     if (isNum(tries) && isNum(every)) {
       const span = Math.max(0, (tries - 1) * every);
       return `${num(tries)} packets over ${dur(span)}, then up to 2m more for the box to finish resuming before it is reported as failed.`;
@@ -49,200 +80,202 @@ function effect(def, value, tun) {
   return "";
 }
 
-function row(def, tun) {
-  const v = dirty[def.key] !== undefined ? dirty[def.key] : tun[def.key];
-  const dec = def.step < 1 ? 2 : 0;
+function tierRow(def) {
+  const v = store.value(def.key);
   return `
-    <div class="cfg" data-key="${def.key}">
+    <div class="cfg" data-tier="${def.key}">
       <div class="top">
         <span class="name">${esc(def.name)}</span>
-        <span class="val"><span data-out>${num(v, dec)}</span> ${esc(def.unit)}</span>
+        <span class="val"><span data-out>${num(v, def.step < 1 ? 2 : 0)}</span> ${esc(def.unit)}</span>
       </div>
       <div class="meta">
         <span>${esc(def.machine)}</span><span>range ${def.min}–${def.max}</span>
-        <span data-dirty class="hidden">unsaved</span>
+        <span data-dirty class="pill hidden"></span>
       </div>
       <input type="range" min="${def.min}" max="${def.max}" step="${def.step}"
-             value="${isNum(v) ? v : def.min}">
+             value="${isNum(v) ? v : def.min}" aria-label="${esc(def.name)}">
       <div class="effect">${esc(def.help)}</div>
-      <div class="effect" data-effect></div>
+      <div class="effect hidden" data-effect></div>
+      ${def.key === "wake_charge_pct" ? '<div class="lockwhy block hidden" data-block></div>' : ""}
     </div>`;
 }
 
+function wireTiers(node) {
+  const rows = TIER1.concat(TIER2).map((def) => {
+    const row = node.querySelector(`.cfg[data-tier="${def.key}"]`);
+    const input = row.querySelector("input");
+    input.addEventListener("input", () => store.stage(def.key, parseFloat(input.value)));
+    return { def, row, input };
+  });
+  return function sync() {
+    // The wake/reserve block is shown under wake, directly below reserve,
+    // so it is on screen whichever of the two is being dragged.
+    const blocks = checks(store).blocks;
+    rows.forEach(({ def, row, input }) => {
+      const v = store.value(def.key);
+      setText(row.querySelector("[data-out]"), num(v, def.step < 1 ? 2 : 0));
+      if (isNum(v) && parseFloat(input.value) !== v) input.value = String(v);
+      const fx = store.isPending(def.key) && isNum(v) ? effect(def, v) : "";
+      const fxNode = row.querySelector("[data-effect]");
+      setText(fxNode, fx);
+      fxNode.classList.toggle("hidden", !fx);
+      const blk = row.querySelector("[data-block]");
+      if (blk) {
+        setText(blk, blocks[0] || "");
+        blk.classList.toggle("hidden", !blocks.length);
+      }
+      pillSync(row, store, def.key);
+    });
+  };
+}
+
 function lockedRow(t) {
+  // pollinterval's displayed value is read live when we have it, so the
+  // pollfreq figure in parentheses can never silently drift from reality.
+  const u = LAST && LAST.ups;
+  const val = t.name === "NUT pollinterval" && u && isNum(u.pollfreq)
+    ? `2 s (pollfreq ${num(u.pollfreq)} s)`
+    : t.value;
   return `
     <div class="cfg locked">
       <div class="top"><span class="name">${esc(t.name)}</span>
-        <span class="val">${esc(t.value)}</span></div>
+        <span class="val">${esc(val)}</span></div>
       <div class="meta"><span>${esc(t.machine)}</span><span>locked</span></div>
       <div class="lockwhy">${esc(t.why)}</div>
     </div>`;
 }
 
-function refreshSaveBar(root, tun) {
-  const keys = Object.keys(dirty);
-  const errs = validate(Object.assign({}, tun, dirty));
-  const bar = root.querySelector("#savebar");
-  const err = root.querySelector("#cfgerr");
-  err.innerHTML = errs.length ? esc(errs[0]) : "";
-  err.classList.toggle("hidden", !errs.length);
-  bar.classList.toggle("hidden", keys.length === 0);
-  const btn = root.querySelector("#save");
-  if (btn) {
-    btn.disabled = errs.length > 0;
-    btn.textContent = errs.length
-      ? "Blocked — see the warning above"
-      : `Apply ${keys.length} change${keys.length === 1 ? "" : "s"}`;
-  }
-}
+/* ---- live readings -> store (never touches a pending value) ---- */
 
-function wire(root, tun) {
-  root.querySelectorAll(".cfg[data-key]").forEach((node) => {
-    const def = TIER1.concat(TIER2).find((d) => d.key === node.dataset.key);
-    const input = node.querySelector("input");
-    if (!input || !def) return;
-    input.addEventListener("input", () => {
-      const value = parseFloat(input.value);
-      node.querySelector("[data-out]").textContent = num(value, def.step < 1 ? 2 : 0);
-      node.querySelector("[data-effect]").textContent = effect(def, value, tun);
-      if (value === tun[def.key]) delete dirty[def.key];
-      else dirty[def.key] = value;
-      node.querySelector("[data-dirty]")
-        .classList.toggle("hidden", dirty[def.key] === undefined);
-      refreshSaveBar(root, tun);
+function feedConfig(d, cat) {
+  const ups = d.ups_settings || {};
+  store.batch(() => {
+    cat.forEach((item) => {
+      if (item.kind === "tunable") {
+        store.setLive(item.key, liveTunable(item.key, d.tunables, d.files, item.where));
+      }
     });
+    (ups.editable || []).forEach((s) => store.setLive(s.name, s.value));
+    const beep = ups.beeper !== undefined ? ups.beeper : (LAST && LAST.ups ? LAST.ups.beeper : null);
+    store.setLive(BEEPER_KEY, beep);
   });
+  const ro = {};
+  (ups.readonly || []).forEach((s) => { if (s.block_key) ro[s.block_key] = s.value; });
+  if (mounted()) paintReadonly(view.node, ro);
+}
 
-  const btn = root.querySelector("#save");
-  if (btn) btn.addEventListener("click", async () => {
-    btn.disabled = true; btn.textContent = "applying…";
-    const res = await put("api/config", dirty);
-    const out = root.querySelector("#cfgresult");
-    if (!res.ok) {
-      out.className = "warnbox";
-      out.innerHTML = esc(res.data.error || `failed (${res.status})`);
-    } else {
-      const ap = Object.entries(res.data.applied || {});
-      const rj = Object.entries(res.data.rejected || {});
-      out.className = rj.length ? "warnbox" : "notebox";
-      out.innerHTML = [
-        ap.length ? `Applied: ${ap.map(([k, v]) => `${esc(k)} = ${v}`).join(", ")}` : "",
-        rj.length ? `Rejected: ${rj.map(([k, v]) => `${esc(k)} (${esc(v)})`).join(", ")}` : "",
-      ].filter(Boolean).join("<br>");
-      dirty = {};
-      setTimeout(() => renderConfig(root, out.innerHTML, out.className), 1200);
+function feedSnapshot(snap) {
+  const t = snap.tunables;
+  const u = snap.ups;
+  const files = (view.d && view.d.files) || {};
+  store.batch(() => view.cat.forEach((item) => {
+    if (item.kind === "tunable" && t) {
+      store.setLive(item.key, liveTunable(item.key, t, files, item.where));
+    } else if (item.kind === "ups" && u && item.blockKey) {
+      store.setLive(item.key, u[item.blockKey]);
+    } else if (item.kind === "beeper" && u) {
+      store.setLive(item.key, u.beeper);
     }
+  }));
+  if (u) paintReadonly(view.node, u);
+}
+
+export function noteSnapshot(snap) {
+  LAST = snap;
+  if (!mounted()) return;
+  feedSnapshot(snap);
+  view.syncTiers();   // effect previews follow the live draw and charge
+}
+
+function syncAll() {
+  if (mounted()) view.syncers.forEach((fn) => fn());
+}
+
+/* After an apply: re-read api/config and fold it in, in place. Not awaited
+   by the popup -- GET api/config waits up to 3 s on a sleeping box, and the
+   verdicts are already on screen. */
+async function refresh() {
+  try {
+    const d = await get("api/config");
+    if (!mounted()) return;
+    view.d = d;
+    feedConfig(d, view.cat);
+  } catch (e) { /* the stream keeps the readings current regardless */ }
+}
+
+function review() {
+  if (!mounted()) return;
+  const rows = reviewRows(store, view.cat);
+  if (!rows.length) return;
+  const { blocks, warns } = checks(store);
+  openReview({
+    rows, blocks, warns,
+    episode: !!(LAST && LAST.episode),
+    fmt: (key, v) => fmtVal(itemFor(view.cat, key), v),
+    heldOf: heldRows,
+    run: async (subset, override, onRow) => {
+      const out = await applyAll(subset, { put, post }, onRow, { override });
+      settle(store, subset, out);
+      refresh();
+      return out;
+    },
   });
 }
 
-export async function renderConfig(root, carryMsg, carryCls) {
-  root.innerHTML = '<div class="empty">loading…</div>';
+function mount(root, d) {
+  if (view && view.unsub) view.unsub();
+  const cat = buildCatalog(d.ups_settings, d.ups_baseline);
+  feedConfig(d, cat);
+  const tun = d.tunables || {};
+  const boxDown = d.files && d.files.box === null;
+  root.innerHTML = `
+    <div data-cfgview>
+      ${LAST && LAST.episode ? `<div class="warnbox"><b>An episode is in progress.</b>
+        Confirmed changes take effect immediately — they are not deferred until it ends.</div>` : ""}
+      ${boxDown ? `<div class="warnbox">The box is not answering, so its
+        tunables (reserve, margins) cannot be written right now.</div>` : ""}
+      <div class="notebox">Live values come from the units themselves — the
+        sentinel's published state, the governor's startup log (source:
+        ${esc(tun.source || "unknown")}) — so this page shows what is
+        actually running rather than a second copy of the configuration. Edits
+        are staged: nothing is written until you review and confirm them.</div>
+      <section class="panel"><h2>Thresholds</h2>${TIER1.map(tierRow).join("")}</section>
+      <section class="panel"><h2>Margins</h2>${TIER2.map(tierRow).join("")}</section>
+      ${parkHtml(store)}
+      <section class="panel"><h2>Locked — shown so the reasoning is not lost</h2>
+        ${TIER3.map(lockedRow).join("")}</section>
+      ${upsFirmwareHtml(d.ups_settings || { editable: [], readonly: [] }, store)}
+      ${resetHtml()}
+      ${saveBarHtml()}
+    </div>`;
+  const node = root.querySelector("[data-cfgview]");
+  view = { node, cat, d, plan: baselinePlan(cat, d.baseline, d.ups_baseline) };
+  view.syncTiers = wireTiers(node);
+  view.syncers = [
+    view.syncTiers,
+    wireParkConfig(node, store),
+    wireUpsFirmware(node, store),
+    wireReset(node, store, () => view.cat, () => view.plan, review),
+    wireSaveBar(node, store, () => view.cat, review),
+  ];
+  view.unsub = store.subscribe(syncAll);
+  syncAll();
+}
+
+/* isCurrent() -> is CONFIG still the active tab. A slow api/config (up to
+   3 s with the box asleep) must not paint over a tab switched to since. */
+export async function renderConfig(root, isCurrent) {
+  const seq = ++renderSeq;
+  const stillHere = () => seq === renderSeq && (!isCurrent || isCurrent());
+  // Re-entering a CONFIG already on screen keeps it up until the fresh copy
+  // is ready, rather than flashing "loading…" and losing the scroll spot.
+  if (!mounted()) root.innerHTML = '<div class="empty">loading…</div>';
   let d;
   try {
     d = await get("api/config");
   } catch (e) {
-    root.innerHTML = `<div class="empty">could not load config: ${esc(e.message)}</div>`;
+    if (stillHere()) root.innerHTML = `<div class="empty">could not load config: ${esc(e.message)}</div>`;
     return;
   }
-  const tun = d.tunables || {};
-  const boxDown = d.files && d.files.box === null;
-  const live = LAST && LAST.episode;
-
-  root.innerHTML = `
-    <div id="cfgresult" class="${carryCls || "notebox hidden"}">${carryMsg || ""}</div>
-    ${live ? `<div class="warnbox"><b>An episode is in progress.</b>
-      Changes take effect immediately — they are not deferred until it ends.</div>` : ""}
-    ${boxDown ? `<div class="warnbox">The box is not answering, so its
-      tunables (reserve, margins) cannot be written right now.</div>` : ""}
-    <div class="notebox">Live values are read from each unit's own startup log
-      (source: ${esc(tun.source || "unknown")}), so this page shows what is
-      actually running rather than a second copy of the configuration.</div>
-    <div class="warnbox hidden" id="cfgerr"></div>
-    <section class="panel"><h2>Thresholds</h2>${TIER1.map((x) => row(x, tun)).join("")}</section>
-    <section class="panel"><h2>Margins</h2>${TIER2.map((x) => row(x, tun)).join("")}</section>
-    <div id="savebar" class="btnrow hidden"><button class="btn primary" id="save">Apply</button></div>
-    <section class="panel"><h2>Locked — shown so the reasoning is not lost</h2>
-      ${TIER3.map(lockedRow).join("")}</section>
-    ${resetSection(tun, d.baseline)}`;
-  wire(root, tun);
-  wireReset(root);
-  refreshSaveBar(root, tun);
-}
-
-/* Reset to the known-good baseline.
-
-   Not a dangerous action — it restores the values this system was tuned and
-   tested with — so one confirmation is right, unlike the emergency controls.
-   What it does need is to not be a mystery button: it lists exactly what it
-   will restore and how many settings currently differ, so pressing it is an
-   informed choice rather than a leap. */
-
-function driftFrom(tun, baseline) {
-  if (!baseline) return [];
-  return Object.keys(baseline).filter((k) =>
-    isNum(tun[k]) && Math.abs(tun[k] - baseline[k]) > 1e-9);
-}
-
-function labelFor(key) {
-  const def = TIER1.concat(TIER2).find((d) => d.key === key);
-  return def ? def.name : key;
-}
-
-function resetSection(tun, baseline) {
-  if (!baseline) return "";
-  const drift = driftFrom(tun, baseline);
-  const dec = (v) => (v < 1 ? 2 : 0);
-  const rows = Object.keys(baseline).map((k) => {
-    const changed = drift.indexOf(k) !== -1;
-    const cur = isNum(tun[k]) ? num(tun[k], dec(baseline[k])) : "?";
-    const base = num(baseline[k], dec(baseline[k]));
-    return `<div class="kv"><span class="k">${esc(labelFor(k))}</span>
-      <span class="v">${changed ? `${cur} → <b>${base}</b>` : base}</span></div>`;
-  }).join("");
-
-  return `
-    <section class="panel"><h2>Reset</h2>
-      <div class="notebox">
-        ${drift.length
-          ? `<b>${drift.length} setting${drift.length === 1 ? "" : "s"} differ from the baseline.</b>
-             Resetting restores the values this system was tuned and tested with,
-             and applies them immediately.`
-          : "Everything already matches the baseline."}
-      </div>
-      <div class="cfg">${rows}</div>
-      <div id="resetresult" class="notebox hidden"></div>
-      <div class="btnrow">
-        <button class="btn ${drift.length ? "primary" : ""}" id="doreset"
-                ${drift.length ? "" : "disabled"}>Reset all to baseline</button>
-      </div>
-    </section>`;
-}
-
-function wireReset(root) {
-  const btn = root.querySelector("#doreset");
-  if (!btn) return;
-  btn.addEventListener("click", async () => {
-    if (!window.confirm("Reset every threshold to the tested baseline and apply it now?")) return;
-    btn.disabled = true;
-    btn.textContent = "resetting…";
-    const res = await post("api/control/reset-config", {});
-    const out = root.querySelector("#resetresult");
-    out.classList.remove("hidden");
-    if (!res.ok) {
-      out.className = "warnbox";
-      out.innerHTML = esc((res.data && res.data.error) || `failed (${res.status})`);
-      btn.disabled = false;
-      btn.textContent = "Reset all to baseline";
-      return;
-    }
-    const rj = Object.entries(res.data.rejected || {});
-    out.className = rj.length ? "warnbox" : "notebox";
-    out.innerHTML = [
-      `Reset applied: ${Object.keys(res.data.applied || {}).length} settings.`,
-      rj.length ? `Not applied: ${rj.map(([k, v]) => `${esc(k)} (${esc(v)})`).join(", ")}` : "",
-    ].filter(Boolean).join("<br>");
-    // Re-read so the page reflects what the units actually loaded, rather
-    // than what we asked for.
-    setTimeout(() => renderConfig(root, out.innerHTML, out.className), 1500);
-  });
+  if (stillHere()) mount(root, d);
 }

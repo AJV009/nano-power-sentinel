@@ -28,7 +28,7 @@ const STEPS = {
   ],
 };
 
-function phaseLine(cut) {
+function phaseLine(cut, timerShutdown) {
   if (!cut || !cut.phase || cut.phase === "idle") return "";
   const bits = {
     hibernating: "Asking the box to hibernate…",
@@ -42,15 +42,28 @@ function phaseLine(cut) {
     ? ` · draw now ${cut.current_load}% (was ${cut.baseline_load}%)` : "";
   const left = isNum(cut.remaining) && cut.remaining > 0
     ? ` · ${dur(cut.remaining)} left` : "";
+  // The countdown above is this dashboard's own ESTIMATE of when the cut
+  // will land. ups.timer.shutdown is the UPS's own quick-polled register --
+  // proof the command actually reached the hardware, not a guess -- so it
+  // is shown as a separate confirmation line rather than folded into the
+  // same number, unless the two already agree, in which case adding it
+  // would just repeat what is already on screen.
+  const upsSecs = isNum(timerShutdown) && timerShutdown >= 0 ? Math.round(timerShutdown) : null;
+  const dupe = upsSecs !== null && isNum(cut.remaining) && Math.round(cut.remaining) === upsSecs;
+  // Always shown once the register is counting -- the point is the proof the
+  // UPS armed, and hiding it when the numbers agree would hide that proof.
+  const confirm = upsSecs === null ? ""
+    : `<div class="notebox">UPS confirms: ${dupe ? "its own countdown matches" : `output off in ${upsSecs}s`}</div>`;
   return `<div class="${cut.phase === "aborted" ? "notebox" : "warnbox"}">
       <b>${esc(bits[cut.phase] || cut.phase)}</b>${esc(load)}${esc(left)}
       ${cut.detail ? `<br><span style="font-size:12px">${esc(cut.detail)}</span>` : ""}
-    </div>`;
+    </div>${confirm}`;
 }
 
 export function dangerZoneHtml(snap) {
   const cut = (snap && snap.ups_cut) || {};
   const running = cut.active;
+  const timerShutdown = snap && snap.ups && snap.ups.timer_shutdown;
   return `
     <section class="panel" style="margin-top:18px">
       <h2 style="color:var(--danger)">Emergency shutdown</h2>
@@ -60,7 +73,7 @@ export function dangerZoneHtml(snap) {
         presses its front-panel button — Wake-on-LAN cannot bring the box
         back once standby power is gone.
       </div>
-      <div id="cutphase">${phaseLine(cut)}</div>
+      <div id="cutphase">${phaseLine(cut, timerShutdown)}</div>
       ${running ? `<div class="btnrow">
           <button class="btn primary" id="cut-abort">Abort</button>
         </div>` : `

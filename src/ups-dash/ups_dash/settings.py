@@ -61,8 +61,17 @@ DB_PATH = _str("UPS_DASH_DB", "/var/lib/ups-dash/telemetry.db")
 NOTIFY_CONF = _str("UPS_DASH_NOTIFY", "/etc/ups-dash/notify.json")
 UPSCMD_CONF = _str("UPS_DASH_UPSCMD", "/etc/ups-dash/upscmd.json")
 TUNABLES_CONF = _str("UPS_DASH_TUNABLES", "/etc/ups-dash/tunables.json")
-# Persistent, not /run: a hold must survive the jetson rebooting mid-outage.
+# The state ledger (ledger.py, docs/LEDGER.md). ups-dash's own facts -- wake
+# hold, park, park outcome, why the box is down -- live in <dir>/dash.json.
+# Persistent, not /run: a hold or a park must survive the jetson rebooting
+# mid-outage. ups-sentinel only reads it.
+LEDGER_DIR = _str("UPS_DASH_LEDGER_DIR", "/var/lib/ups-dash/ledger")
+# The sentinel's own facts, written only by it (tmpfs, 30 s heartbeat).
+SENTINEL_STATE = _str("UPS_DASH_SENTINEL_STATE", "/run/ups-sentinel/state.json")
+# LEGACY marker files, read once by ledger.migrate_legacy() and then deleted.
 WAKE_HOLD = _str("UPS_DASH_WAKE_HOLD", "/var/lib/ups-dash/wake-hold")
+PARK_MARKER = _str("UPS_DASH_PARK_MARKER", "/var/lib/ups-dash/park")
+PARK_OUTCOME = _str("UPS_DASH_PARK_OUTCOME", "/var/lib/ups-dash/park-outcome")
 
 
 def summary():

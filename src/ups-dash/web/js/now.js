@@ -20,11 +20,34 @@ function stateSentence(snap) {
   };
 }
 
+/* "Is mains lost right now?" is the server's answer (snap.view.on_battery,
+   ledger_tick.py): ups.on_battery with a battery self-test's OB set aside --
+   a test genuinely runs the load from the pack for a few seconds (NUT issue
+   #2104) while mains at the wall is fine, and "LOST" would misreport that.
+   It stays right while a park holds the headline (view.mode "parked"). */
+function mainsLost(snap) {
+  return (snap.view || {}).on_battery === true;
+}
+
+/* input.transfer.reason is a new NUT var: WHY the UPS went to battery. Only
+   trustworthy once `trusted` is true (pollfreq + 2s after the on-battery
+   edge, per the collector), so an untrusted reading is withheld entirely
+   rather than shown as if it were current. Skipped if the backend's own
+   detail line already says the same thing, so this never becomes a second
+   copy of the same sentence. */
+function transferWhy(snap, alreadyShown) {
+  const onBatt = mainsLost(snap);
+  const tr = snap.transfer || {};
+  if (!onBatt || !tr.trusted || !tr.reason) return "";
+  if (alreadyShown && alreadyShown.indexOf(tr.reason) !== -1) return "";
+  return `<span class="why">why: ${esc(tr.reason)}</span>`;
+}
+
 function flow(snap) {
   const u = snap.ups || {};
   const v = (snap.box || {}).vitals || {};
   const gpu = v.gpu || {}, cpu = v.cpu || {};
-  const onBatt = (snap.derived || {}).mode === "battery";
+  const onBatt = mainsLost(snap);
   return `
     <div class="flow">
       <div class="node">
@@ -74,7 +97,7 @@ export function renderNow(root, snap, ring) {
   const showSpark = !!snap.episode;
   root.innerHTML = `
     <section class="timeline" id="tl"></section>
-    <div class="stateline">${s.main}<span class="why">${esc(s.why)}</span>${
+    <div class="stateline">${s.main}<span class="why">${esc(s.why)}</span>${transferWhy(snap, s.why)}${
       s.action ? `<span class="why" style="color:var(--state)">\u2192 ${esc(s.action)}</span>` : ""
     }</div>
     <section class="panel">
@@ -113,6 +136,8 @@ export function boxSheetHtml(snap) {
   const gpu = v.gpu || {}, cpu = v.cpu || {}, mem = v.mem || {};
   const stale = b.state !== "awake";
   const hibOk = v.can_hibernate;
+  const u = snap.ups || {};
+  const selfTestActive = u.self_test === true;
   const rows = [
     ["State", `${b.state}${stale ? " (readings below are last known)" : ""}`],
     ["Why", b.why],
@@ -137,6 +162,11 @@ export function boxSheetHtml(snap) {
     <div class="btnrow">
       <button class="btn primary" id="ctl-wake">Wake (WoL)</button>
       <button class="btn danger" id="ctl-hib" ${hibOk ? "" : "disabled"}>Hibernate</button>
+    </div>
+    <div class="muted" style="font-size:11px;margin:14px 0 4px">UPS</div>
+    <div class="btnrow">
+      <button class="btn" id="ctl-selftest-start" ${selfTestActive ? "disabled" : ""}>Run battery self-test</button>
+      ${selfTestActive ? `<button class="btn" id="ctl-selftest-stop">Stop self-test</button>` : ""}
     </div>
     ${dangerZoneHtml(snap)}
     <button class="btn close" id="sheetclose">Close</button>`;

@@ -18,6 +18,11 @@ LOCAL_SPEC = {
     "mains_stable_sec":  (30.0, 1800.0),
     "wake_tries":        (1.0, 20.0),
     "wake_interval_sec": (5.0, 300.0),
+    # Battery-floor PARK: ups-dash's own feature (park.py), not a governor or
+    # sentinel constant -- the sentinel never logs these, so they have no
+    # compiled-in twin to match the way the rest of BASELINE does.
+    "park_enabled":      (0.0, 1.0),
+    "park_floor_pct":    (15.0, 80.0),
 }
 BOX_SPEC = {
     "reserve_pct":          (10.0, 80.0),
@@ -26,6 +31,11 @@ BOX_SPEC = {
     "fixed_overhead_sec":   (0.0, 120.0),
     "comms_loss_limit_sec": (15.0, 600.0),
 }
+
+# park_enabled is stored as a float like every other tunable (one file
+# format, no special-casing on disk) but is boolean in meaning: any truthy
+# value coerces to 1.0 rather than being validated as a number in [0, 1].
+BOOLEAN_KEYS = frozenset({"park_enabled"})
 
 # The known-good baseline the Reset button restores.
 #
@@ -40,16 +50,19 @@ BOX_SPEC = {
 # misconfiguring something.
 BASELINE = {
     # governor (workstation)
-    "reserve_pct": 30.0,
+    "reserve_pct": 50.0,
     "safety_sec": 30.0,
     "write_rate_gbps": 0.5,
     "fixed_overhead_sec": 15.0,
     "comms_loss_limit_sec": 45.0,
     # sentinel (jetson)
-    "wake_charge_pct": 50.0,
+    "wake_charge_pct": 70.0,
     "mains_stable_sec": 120.0,
     "wake_tries": 5.0,
     "wake_interval_sec": 30.0,
+    # battery-floor park (jetson; ups-dash's own feature)
+    "park_enabled": 1.0,
+    "park_floor_pct": 35.0,
 }
 
 # THE ONE GENUINELY DANGEROUS COMBINATION.  If the box is allowed to wake at
@@ -94,16 +107,35 @@ def _put_box(base_url, payload, timeout=5.0):
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _truthy(raw):
+    """Coerce a JSON bool/number/string to True/False for BOOLEAN_KEYS.
+
+    Accepts what a browser is actually likely to send (JSON true/false, 1/0,
+    "on"/"off") rather than only Python-native types, since this is fed
+    straight from the PUT body.
+    """
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return raw != 0
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("", "0", "false", "off", "no")
+    return bool(raw)
+
+
 def _coerce(updates, spec):
     ok, bad = {}, {}
     for key, raw in updates.items():
         if key not in spec:
             continue
-        try:
-            val = float(raw)
-        except Exception:
-            bad[key] = "not a number"
-            continue
+        if key in BOOLEAN_KEYS:
+            val = 1.0 if _truthy(raw) else 0.0
+        else:
+            try:
+                val = float(raw)
+            except Exception:
+                bad[key] = "not a number"
+                continue
         lo, hi = spec[key]
         if not (lo <= val <= hi):
             bad[key] = "outside the permitted range %g..%g" % (lo, hi)
@@ -155,6 +187,17 @@ def apply(updates, box_url, live_tunables):
                 "flapping loop." % (wake, WAKE_RESERVE_MARGIN, reserve)),
                 "rejected": rejected}, 422
 
+    # Floor >= reserve is legitimate (it just means "park immediately after
+    # hibernating"), so this is a heads-up, never a rejection -- unlike the
+    # wake/reserve pair above, which is a real flapping-loop hazard.
+    park_warning = None
+    floor = merged.get("park_floor_pct")
+    if isinstance(floor, (int, float)) and isinstance(reserve, (int, float)):
+        if floor >= reserve:
+            park_warning = (
+                "Battery floor (%g%%) is at or above reserve (%g%%): the UPS "
+                "will park straight after the box hibernates." % (floor, reserve))
+
     applied = {}
     if local_ok:
         current = read_local()
@@ -174,6 +217,8 @@ def apply(updates, box_url, live_tunables):
     out = {"applied": applied, "rejected": rejected}
     if warning:
         out["warning"] = warning
+    if park_warning:
+        out["park_warning"] = park_warning
     return out, 200
 
 

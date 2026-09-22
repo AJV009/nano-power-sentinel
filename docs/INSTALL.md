@@ -103,6 +103,13 @@ turns the wake source back off. The shipped unit greps before writing.
 have no explicit "Wake on LAN" setting — WoL is governed by ErP being
 *disabled* plus the OS arming the NIC.
 
+⚠ Set **Restore on AC power loss ("AC BACK") = Always On** if the battery-floor
+park is enabled (it is by default). A park cuts the box's standby power, and
+the NIC forgets its WoL arming, so the box can only come back by powering
+itself on when the output returns. ups-dash then puts it back to sleep, and
+the sentinel's gate wakes it properly. With "Always Off", every long outage
+ends with a box that needs its power button pressed.
+
 ---
 
 ## 2. Sentinel: NUT with the UPS on USB
@@ -115,14 +122,20 @@ sudo apt install nut                 # or your distro's package
 
 ```ini
 [apc]
+    pollfreq = 10
     driver = usbhid-ups
     port = auto
     pollinterval = 2
 ```
 
-⚠ **Do not set `pollinterval = 1`.** On the hardware this was developed
-against, that killed the UPS HID interface mid-outage: the driver stayed alive
-reporting `Data stale` while `/dev/hidraw*` vanished.
+- **`pollfreq`** is the setting that decides how fresh load, voltage and
+  runtime are. `pollinterval` only refreshes the status bits and timers. The
+  default `pollfreq` of 30 s makes every "live" watts reading a 30-second
+  staircase ([UPS-TOOLING.md](UPS-TOOLING.md) §1).
+- ⚠ **Leave `pollinterval` at 2.** At 1 s, this unit stalled mid-outage: no
+  USB disconnect, the driver alive, and `Data stale` until it was restarted.
+  The distro 2.7.4 driver never recovers from a stall on its own; see the
+  driver upgrade and the stall watchdog below.
 
 Set `upsd.conf` to listen on loopback plus the sentinel's LAN address, create
 users in `upsd.users`, then:
@@ -150,10 +163,51 @@ sudo cp src/jetson/systemd/resilience.conf \
 upscmd -l apc
 ```
 
-If there is no `load.on` and no `shutdown.return`, **killpower is not
-available to you** — the UPS will not re-energise its own output, and the
-emergency shutdown becomes a one-way action requiring physical presence. Plan
-around Wake-on-LAN, as this project does.
+The command list alone does not tell you what each command *does*. On APC
+Back-UPS units, two commands that look similar behave oppositely:
+
+| Command | Register | What this unit does |
+|---|---|---|
+| `load.off`, `load.off.delay` | 0x15 | cuts and **stays off** until the front button |
+| `shutdown.reboot` (value `1`), `shutdown.return` (NUT master) | 0x40 | cuts after ~60 s, then **comes back on**: ~4 s later on mains, or ~1 s after mains returns on battery |
+
+Nothing turns the output back on after a 0x15 cut. So whatever your list
+says, **bench-test with nothing plugged in** before relying on any of it:
+
+```bash
+scripts/ups-bench-test.sh 1   # on mains
+scripts/ups-bench-test.sh 2   # remote power-on from OFF?
+scripts/ups-bench-test.sh 3   # on battery (pull the wall plug first)
+```
+
+The results for this unit are in [UPS-TOOLING.md](UPS-TOOLING.md) §7.
+
+### Optional: newer driver, stall watchdog, extra permissions
+
+**NUT master driver** (only the driver; upsd and upsmon stay distro):
+
+```bash
+# on the jetson, as the normal user
+mkdir -p ~/build && cd ~/build && git clone --depth 50 https://github.com/networkupstools/nut.git
+./build-nut-master.sh                       # from scripts/, ~10 min
+sudo nut-driver-upgrade install             # refuses to run on battery
+sudo nut-driver-upgrade rollback            # back to the distro driver
+```
+
+**Stall watchdog.** Restarts `nut-driver` after 20 s of `Data stale` while the
+UPS is still on the USB bus:
+
+```bash
+sudo systemctl enable --now nut-stall-watchdog
+```
+
+**Permissions for the dashboard's UPS controls.** Self-test, beeper, settings
+and `shutdown.reboot` all need rights the emergency-cut user lacks. Grant
+them, with a backup and a self-check:
+
+```bash
+sudo grant-ups-ops
+```
 
 ---
 

@@ -442,13 +442,24 @@ Displayed read-only with the reason attached. Not editable from the UI at any ti
 
 | Setting | Value | Why locked |
 |---|---|---|
-| NUT `pollinterval` | 2 | **Setting this to 1 killed the APC HID interface mid-outage on 2026-09-20** (`/dev/hidraw1` vanished, driver alive but `Data stale`). Shown specifically so the incident is not forgotten and not repeated. |
+| NUT `pollinterval` | 2 | Refreshes only status bits and timers; load, voltage and runtime follow `pollfreq` (10 s). At 1 s the UPS stalled mid-outage on 2026-09-20 — no USB disconnect, which the 2.7.4 driver could not recover from ([UPS-TOOLING.md](UPS-TOOLING.md) §2). Shown so the incident is not repeated. |
 | `DEBOUNCE` | 3 | Changing it alters trigger semantics, not a threshold |
 | `SETTLE_SEC` | 30 | Compensates a hardware gauge transient; not a preference |
 | script `POLL`, `REPORT_EVERY` | — | Loop timing, not policy |
 | `BOX_IP`, `BOX_MAC`, `BROADCAST` | — | Identity, not tuning |
 
 ### 9.5 Safety mechanics
+
+0. **Staged, reviewed, confirmed (2026-09-22).** Nothing on CONFIG applies on touch.
+   - **One pending store.** Every edit (tunables, the park floor and toggle, UPS
+     firmware settings, the beeper preference) feeds it. A fixed bar above the tab bar
+     reads `n changes · SAVE`; the count opens the list, with a per-item undo.
+   - **Review.** SAVE opens a review matrix (setting · where it lives · current → new).
+     Confirm applies it, with a per-row result: applied, UPS-verified, or held by the
+     interlock.
+   - **Reset.** Reset stages the whole baseline (all 15 values) into the same review.
+   - **The exception.** *Mute now* is an action, not a setting: it fires immediately,
+     because mid-outage is exactly when it is needed.
 
 1. **Fail-safe load.** Config files are `/etc/ups-dash/tunables.json` on each machine.
    Missing, malformed, unparseable, unknown key, wrong type, or out of range -> the

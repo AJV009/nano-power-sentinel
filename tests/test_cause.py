@@ -2,7 +2,9 @@
 import os, sys, tempfile
 ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "ups-dash")
 sys.path.insert(0, ROOT)
-os.environ["UPS_DASH_WAKE_HOLD"] = os.path.join(tempfile.mkdtemp(), "wake-hold")
+_TMP = tempfile.mkdtemp()
+os.environ["UPS_DASH_WAKE_HOLD"] = os.path.join(_TMP, "wake-hold")
+os.environ["UPS_DASH_LEDGER_DIR"] = os.path.join(_TMP, "ledger")   # the hold's home now
 from ups_dash import cause as C, states as S
 try:
     from ups_dash import hold

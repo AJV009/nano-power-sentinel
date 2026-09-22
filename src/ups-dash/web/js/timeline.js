@@ -33,12 +33,34 @@ export function stateOf(snap) {
   return "nominal";
 }
 
+/* The display mode is the server's (snap.view.mode, ledger_tick.py) -- this
+   file used to re-derive it. derived.mode, except:
+     null      during a battery self-test: ups.status swings through
+               OB/DISCHRG for a few seconds (NUT #2104), and a hibernate
+               countdown or a shouted "OFF" during a routine monthly test
+               would be actively wrong -- so the calm default below
+     "parked"  while the UPS is parked on purpose */
+function modeOf(snap) {
+  return (snap.view || {}).mode;
+}
+
 function headline(snap) {
   const u = snap.ups, d = snap.derived || {}, t = snap.tunables || {};
+  const mode = modeOf(snap);
+  /* Parked on purpose: the UPS switched itself off to hold its charge, so
+     "cannot read the UPS" and "needs the front-panel button" would both be
+     wrong. The pack figure is the one that matters, and it is frozen. */
+  if (mode === "parked") {
+    const pk = snap.park || {};
+    return { big: "PARKED", unit: "",
+             note: pk.phase === "armed" ? "UPS output off in about a minute — holding the pack"
+                 : pk.phase === "returning" ? "mains back — output returning"
+                 : `pack held at ${num(pk.charge)}% until mains returns` };
+  }
   if (!u.ok) {
     return { big: DASH, unit: "", note: "cannot read the UPS — holding state" };
   }
-  if (d.mode === "battery") {
+  if (mode === "battery") {
     if (isNum(d.eta_hibernate_sec)) {
       return d.eta_hibernate_sec <= 0
         ? { big: "NOW", unit: "", note: "at or past the hibernate threshold" }
@@ -47,7 +69,7 @@ function headline(snap) {
     }
     return { big: dur(u.runtime), unit: "", note: "until empty (hibernate estimate unavailable)" };
   }
-  if (d.mode === "recovering") {
+  if (mode === "recovering") {
     if (d.eta_wake_sec === 0) {
       return { big: "READY", unit: "", note: `charge is past the ${num(t.wake_charge_pct)}% gate` };
     }
@@ -57,11 +79,11 @@ function headline(snap) {
   /* With the output de-energised there is no runway and nothing to project.
      Showing "1h 53m runway" here was actively misleading: the box it refers
      to has no power at all, and no countdown will change that. */
-  if (d.mode === "output_off") {
+  if (mode === "output_off") {
     return { big: "OFF", unit: "",
              note: "UPS output de-energised — needs the front-panel button" };
   }
-  if (d.mode === "down") {
+  if (mode === "down") {
     const st = snap.state || {};
     return { big: DASH, unit: "",
              note: st.short ? st.short.toLowerCase() : "box is down" };
@@ -71,16 +93,20 @@ function headline(snap) {
 
 function legend(snap) {
   const u = snap.ups, d = snap.derived || {};
+  const mode = modeOf(snap);
   const left = `charge ${pct(u.charge)}`;
   let mid;
-  if (d.mode === "battery" && isNum(d.drain_pct_min)) {
+  if (mode === "battery" && isNum(d.drain_pct_min)) {
     mid = `draining ${num(d.drain_pct_min, 2)} %/min`;
-  } else if (d.mode === "recovering" && isNum(d.drain_pct_min)) {
+  } else if (mode === "recovering" && isNum(d.drain_pct_min)) {
     mid = `charging ${num(Math.abs(d.drain_pct_min), 2)} %/min`;
   } else {
     mid = `load ${watts(u.watts)} W`;
   }
-  const right = (d.mode === "output_off" || d.mode === "down")
+  // Only OUTPUT_OFF means the UPS outlets are dead. "down" is the BOX being
+  // off while the outlets are live -- labelling that "output off" (as this
+  // once did) described the wrong machine.
+  const right = mode === "output_off"
     ? `${num(u.batt_v, 1)} V pack · output off`
     : snap.episode
       ? `episode ${dur(snap.episode.elapsed)}`
@@ -89,12 +115,12 @@ function legend(snap) {
 }
 
 export function renderTimeline(root, snap) {
-  const u = snap.ups || {}, d = snap.derived || {}, t = snap.tunables || {};
+  const u = snap.ups || {}, t = snap.tunables || {};
   const h = headline(snap);
   const charge = isNum(u.charge) ? Math.max(0, Math.min(100, u.charge)) : 0;
   const reserve = t.reserve_pct;
   const gate = t.wake_charge_pct;
-  const showGate = d.mode === "recovering" && isNum(gate);
+  const showGate = modeOf(snap) === "recovering" && isNum(gate);
 
   const marks = [];
   if (isNum(reserve)) {

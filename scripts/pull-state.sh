@@ -76,6 +76,7 @@ grab $BOX $BOXPW /etc/systemd/system/box-health.timer      box/systemd/box-healt
 
 echo "=== JETSON (the sentinel) ==="
 grab $NANO $NANOPW /usr/local/sbin/ups-sentinel             jetson/sbin/ups-sentinel
+grab $NANO $NANOPW /usr/local/sbin/ups_sentinel_io.py       jetson/sbin/ups_sentinel_io.py   # 2026-09-22: split out; the sentinel imports it
 grab $NANO $NANOPW /etc/systemd/system/ups-sentinel.service jetson/systemd/ups-sentinel.service
 grab $NANO $NANOPW /etc/systemd/system/ups-dash.service     jetson/systemd/ups-dash.service
 grab $NANO $NANOPW /etc/systemd/system/ups-sentinel.service.d/resilience.conf jetson/systemd/dropins/ups-sentinel.resilience.conf
@@ -97,6 +98,13 @@ grab $NANO $NANOPW /usr/local/sbin/setup-upscmd-creds      jetson/sbin/setup-ups
 grab $NANO $NANOPW /usr/local/sbin/eth-leds                jetson/sbin/eth-leds
 grab $NANO $NANOPW /etc/systemd/system/eth-leds-off.service jetson/systemd/eth-leds-off.service
 grab $NANO $NANOPW /etc/systemd/system/eth-leds-off.timer  jetson/systemd/eth-leds-off.timer
+# 2026-09-22: UPS tooling -- stall watchdog, master driver swap, ops grant
+grab $NANO $NANOPW /usr/local/sbin/nut-stall-watchdog       jetson/sbin/nut-stall-watchdog
+grab $NANO $NANOPW /etc/systemd/system/nut-stall-watchdog.service jetson/systemd/nut-stall-watchdog.service
+grab $NANO $NANOPW /usr/local/sbin/nut-driver-upgrade       jetson/sbin/nut-driver-upgrade
+grab $NANO $NANOPW /etc/systemd/system/nut-driver.service.d/driver-master.conf jetson/systemd/dropins/nut-driver.driver-master.conf
+grab $NANO $NANOPW /home/jetson/build/grant-ups-ops         jetson/sbin/grant-ups-ops
+grab $NANO $NANOPW /home/jetson/build/build-nut.sh          jetson/build/build-nut.sh
 
 echo
 echo "Secrets scrubbed to <secret>. Verify with: grep -ri password $HERE/box $HERE/jetson"

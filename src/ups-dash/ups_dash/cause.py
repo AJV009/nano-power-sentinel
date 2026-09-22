@@ -15,6 +15,11 @@ disappears. If the box then goes away shortly afterwards, that intent becomes
 the cause. If it goes away with no intent on record, the UPS decides: on
 battery means the outage took it; otherwise the cause is genuinely unknown,
 which is itself worth saying out loud rather than papering over.
+
+PUBLISHED to the state ledger's "cause" key (ledger.py) whenever it changes:
+{"down_cause", "intent", "intent_at", "since"} -- `since` is when the current
+down_cause was attributed. Informational for other readers: the sentinel
+never takes a decision from ups-dash's classifier (docs/LEDGER.md).
 """
 
 import time
@@ -22,7 +27,7 @@ import time
 from . import hold
 from .states import (CAUSE_OUTAGE, CAUSE_UNKNOWN, CAUSE_EMERGENCY_SAFE,
                      CAUSE_EMERGENCY_INSTANT, CAUSE_MANUAL_HIBERNATE,
-                     MANUAL_CAUSES)
+                     MANUAL_CAUSES, PARK_ARMED, PARK_PARKED, PARK_RETURNING)
 from .states import (EMERGENCY_INSTANT_CUT as EV_INSTANT_CUT,
                      EMERGENCY_SAFE_CUT as EV_SAFE_CUT,
                      EMERGENCY_SAFE_STARTED as EV_SAFE_STARTED,
@@ -35,11 +40,32 @@ INTENT_TTL = 420.0
 
 
 class CauseTracker(object):
-    def __init__(self):
+    def __init__(self, ledger=None):
         self.cause = None          # set only while the box is down
+        self._since = None         # when `cause` was attributed
         self._intent = None
         self._intent_at = 0.0
         self._was_awake = None
+        self._ledger = ledger      # None: publish nowhere (tests)
+        self._published = None
+
+    def attribution(self):
+        """The ledger's "cause" value."""
+        return {"down_cause": self.cause, "intent": self._intent,
+                "intent_at": self._intent_at if self._intent else None,
+                "since": self._since if self.cause else None}
+
+    def _publish(self):
+        """To the ledger, only when it changed. Never raises."""
+        if self._ledger is None:
+            return
+        try:
+            doc = self.attribution()
+            if doc != self._published:
+                self._ledger.set("cause", doc)   # a failed write: ledger retries
+                self._published = doc
+        except Exception:
+            pass
 
     def recover_from_store(self, store, now=None, window=21600.0):
         """Re-learn the cause after a restart.
@@ -64,8 +90,9 @@ class CauseTracker(object):
                     break
                 cause = implies.get(ev.get("kind"))
                 if cause:
-                    self.cause = cause
+                    self.cause, self._since = cause, ts or now
                     self._was_awake = False
+                    self._publish()
                     return cause
         except Exception:
             pass
@@ -75,17 +102,37 @@ class CauseTracker(object):
         """Called by a control action just before it acts."""
         self._intent = cause
         self._intent_at = now or time.time()
+        self._publish()
 
     def clear_intent(self):
         self._intent = None
         self._intent_at = 0.0
+        self._publish()
 
-    def update(self, now, box_state, on_battery):
-        """Call once per tick. Returns the current cause, or None if up."""
+    def update(self, now, box_state, on_battery, park=None):
+        """Call once per tick. Returns the current cause, or None if up.
+
+        `park` is snap["park"] (park.py) as it stood BEFORE this tick's park
+        decision -- the phase the box's return happened in."""
+        cause = self._update(now, box_state, on_battery, park)
+        self._publish()
+        return cause
+
+    def _update(self, now, box_state, on_battery, park):
         awake = (box_state == "awake")
 
         if awake:
             came_back = (self._was_awake is False)
+            # After a battery-floor park the box powers ITSELF on with the
+            # mains (BIOS AC BACK). That is not "you woke it": the guard puts
+            # it straight back to sleep, so a manual shutdown's hold must
+            # survive -- the sentinel reads it once the park story ends, and
+            # clearing it here would let the next gate wake a box you
+            # switched off -- and a declared intent must still attribute the
+            # drop. (The guard itself decides on its hold SNAPSHOT.)
+            if came_back and (park or {}).get("phase") in (
+                    PARK_ARMED, PARK_PARKED, PARK_RETURNING):
+                came_back = False
             self.cause = None
             self._was_awake = True
             # ⚠ The intent is NOT cleared on every awake tick. It is declared
@@ -110,6 +157,7 @@ class CauseTracker(object):
         # re-deciding every tick would let the cause flip as the UPS state
         # changes underneath (e.g. mains returning mid-outage).
         if self.cause is None:
+            self._since = now
             if self._intent and (now - self._intent_at) <= INTENT_TTL:
                 self.cause = self._intent
             elif on_battery is True:

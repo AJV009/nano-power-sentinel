@@ -1,0 +1,50 @@
+#!/bin/bash
+# /etc/nut/upssched-cmd -- invoked by upssched (upssched.conf: CMDSCRIPT).
+# Runs as root (RUN_AS_USER root in upsmon.conf). Install: 0750 root:nut.
+#
+# WHAT THIS NO LONGER DOES: schedule a hibernate. The old fixed "hibernate in
+# 60 s" timer was removed on 2026-09-20; hibernate-governor decides when to
+# hibernate from charge, runtime and RAM. Only LOWBATT still hibernates here,
+# as the backstop.
+#
+# The GPU cap and the inference stop are OPTIONAL: they run only if their
+# tools exist. The log says what actually happened -- the previous version
+# logged "GPU capped 150W, inference stopped; hibernate in 60s" on a box with
+# no rocm-smi, no inference.service and no timer, i.e. three false claims.
+
+ROCM=$(command -v rocm-smi || echo /opt/rocm/bin/rocm-smi)
+
+gpu_cap() {    # gpu_cap WATTS -> prints what happened
+    if [ -x "$ROCM" ]; then
+        "$ROCM" --setpoweroverdrive "$1" >/dev/null 2>&1 \
+            && echo "GPU capped to ${1}W" || echo "GPU cap to ${1}W FAILED"
+    else
+        echo "no GPU cap (rocm-smi not installed)"
+    fi
+}
+
+inference() {  # inference start|stop -> prints what happened
+    local done=started; [ "$1" = stop ] && done=stopped
+    if systemctl cat inference.service >/dev/null 2>&1; then
+        systemctl "$1" inference.service 2>/dev/null \
+            && echo "inference $done" || echo "inference $1 FAILED"
+    else
+        echo "no inference.service"
+    fi
+}
+
+case "$1" in
+  on-battery)
+      logger -t upssched "mains lost - $(gpu_cap 150), $(inference stop); hibernate-governor decides when to hibernate"
+      ;;
+  on-line)
+      logger -t upssched "mains restored - $(gpu_cap 230), $(inference start)"
+      ;;
+  hibernate|hibernate-now)
+      logger -t upssched "hibernating now (trigger: $1)"
+      systemctl hibernate
+      ;;
+  *)
+      logger -t upssched "unknown trigger: $1"
+      ;;
+esac

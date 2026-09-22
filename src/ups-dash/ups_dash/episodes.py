@@ -28,14 +28,27 @@ class EpisodeTracker(object):
     def id(self):
         return self.current["id"] if self.current else None
 
-    def update(self, now, ups, box_state, charge, preroll):
-        """`preroll` is a callable returning flattened rows from the ring buffer."""
-        abnormal = bool(ups.get("on_battery")) or box_state in ("hibernated",
-                                                                "unreachable")
+    def update(self, now, ups, box_state, charge, preroll, self_test=False,
+               park_active=False):
+        """`preroll` is a callable returning flattened rows from the ring buffer.
+
+        `self_test` is states.self_test_explains(): a battery test can show
+        DISCHRG (and, on a unit that reports it, OB) for a few seconds. That
+        is not an outage and must not open one -- it would stamp a routine
+        test into HISTORY as a power cut. If OB outlives the test, the next
+        tick without the flag opens the episode as usual.
+
+        `park_active` (a park marker exists, park.py) keeps the story in ONE
+        episode: after a park the box powers itself on and is put back to
+        sleep, and that minute awake on mains would otherwise read as calm
+        and split the outage into two cards."""
+        on_batt = ups.get("on_battery") is True and not self_test
+        abnormal = (on_batt or box_state in ("hibernated", "unreachable")
+                    or bool(park_active))
         if abnormal:
             self._calm_since = None
             if self.current is None:
-                self._open(now, ups, box_state, charge, preroll)
+                self._open(now, on_batt, box_state, charge, preroll)
             else:
                 self.store.note_charge_min(self.current["id"], charge)
         elif self.current is not None:
@@ -44,8 +57,8 @@ class EpisodeTracker(object):
             elif now - self._calm_since >= CLOSE_AFTER:
                 self._close(now, charge)
 
-    def _open(self, now, ups, box_state, charge, preroll):
-        kind = "outage" if ups.get("on_battery") else "box_absent"
+    def _open(self, now, on_batt, box_state, charge, preroll):
+        kind = "outage" if on_batt else "box_absent"
         ep_id = self.store.open_episode(now, kind, charge)
         self.current = {"id": ep_id, "kind": kind, "started": now}
         self.store.add_event(now, "episode_start", ep_id,

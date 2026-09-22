@@ -1,0 +1,187 @@
+/* CONFIG staging UI: row status, the floating save bar and its change
+   list, the review popup and its matrix, and the "Mute now" action.
+
+   Stacking, bottom to top (existing values in layout.css/controls.css):
+     .topbar          sticky   20
+     .pbar            fixed    25   phones: sits ON TOP of the tab bar's
+                                    edge, never overlapping it
+     nav.tabs         fixed    30
+     .sheet-backdrop  fixed    40   NOW tab only -- never coexists with .pbar
+     .modal-back      fixed    50   covers the tabs too, so the tab cannot
+                                    change under an open review */
+
+:root { --pbar-h: 62px; }   /* 2px rule + 8 + 44px buttons + 8 */
+
+/* ---- row status ---- */
+/* Inset bar rather than a border: toggling it must not shift the row. */
+.cfg.is-pending { box-shadow: inset 3px 0 0 var(--state); }
+.pill {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em;
+  text-transform: uppercase; padding: 0 6px;
+  border: 1px solid var(--state); color: var(--state);
+}
+.pill.land { border-color: var(--line); color: var(--dim); }
+.cfg .lockwhy.block { color: var(--danger); border-left-color: var(--danger); }
+.where {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--dim); white-space: nowrap;
+  border: 1px solid var(--line); padding: 0 5px;
+}
+
+/* ---- "Mute now": an action, deliberately unlike the settings ---- */
+.cfg-act { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
+.act-tag {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--warn); margin-bottom: 8px;
+}
+.btn.act, .btn.act:hover:not(:disabled) { border-color: var(--warn); color: var(--warn); }
+.btn.act:hover:not(:disabled) { background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.cfg-act .notebox, .cfg-act .warnbox { margin: 10px 0 0; }
+
+/* ---- save bar ---- */
+/* Always in the page (see savebar.js): the Reset button can always be
+   scrolled clear of the bar, and nothing jumps when the bar goes away. */
+.pbar-space { height: var(--pbar-h); }
+.pbar {
+  position: fixed; left: 0; right: 0; z-index: 25;
+  /* nav.tabs = 1px rule + --nav-h + its own safe-area padding */
+  bottom: calc(var(--nav-h) + 1px + env(safe-area-inset-bottom, 0px));
+  background: var(--surface);
+  border-top: 2px solid var(--state);
+}
+.pbar.blocked { border-top-color: var(--danger); }
+.pbar-in { max-width: 1100px; margin: 0 auto; padding: 8px var(--gutter); }
+.pbar-row {
+  display: grid; gap: var(--gap);
+  grid-template-columns: minmax(0, 1fr) minmax(104px, 38%);
+}
+.pbar-count {
+  appearance: none; position: relative; display: block; width: 100%;
+  background: none; border: 1px solid var(--line); color: var(--text);
+  font-family: var(--mono); font-size: 12px; letter-spacing: .08em;
+  text-transform: uppercase; text-align: left; cursor: pointer;
+  min-height: 44px; padding: 0 30px 0 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pbar-count b { color: var(--state); font-weight: 600; }
+.pbar-count .caret { position: absolute; right: 12px; top: 50%;
+                     transform: translateY(-50%); color: var(--dim); }
+.pbar.blocked .pbar-count { color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent); }
+@media (max-width: 360px) { .pbar.blocked .pc-word { display: none; } }
+
+.pbar-list {
+  max-height: min(50vh, 360px); overflow-y: auto; overscroll-behavior: contain;
+  margin-bottom: 8px; border-bottom: 1px solid var(--line);
+}
+.pl-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 8px;
+  align-items: center; padding: 4px 0; border-bottom: 1px solid var(--line-soft);
+}
+.pl-txt { min-width: 0; }
+.pl-name { display: block; font-size: 13px; overflow-wrap: anywhere; }
+.pl-chg {
+  display: block; font-family: var(--mono); font-size: 12px; color: var(--dim);
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.pl-chg b { color: var(--state); font-weight: 600; }
+.pl-chg .where { margin-left: 6px; }
+.pl-x {
+  appearance: none; width: 44px; height: 44px; cursor: pointer;
+  background: none; border: 1px solid var(--line); color: var(--dim);
+  font-size: 20px; line-height: 1;
+}
+.pl-x:hover { color: var(--danger); border-color: var(--danger); }
+.pbar-discard {
+  appearance: none; background: none; border: 0; padding: 0; cursor: pointer;
+  min-height: 44px; color: var(--dim);
+  font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
+  text-transform: uppercase; text-decoration: underline; text-underline-offset: 3px;
+}
+
+/* ---- review popup ---- */
+html.modal-open, html.modal-open body { overflow: hidden; }
+.modal-back {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0, 0, 0, .6);
+  display: flex; align-items: flex-end; justify-content: center;
+  padding-top: max(24px, env(safe-area-inset-top, 0px));
+}
+.modal {
+  width: 100%; max-width: 680px; max-height: 100%;
+  display: flex; flex-direction: column;
+  background: var(--bg); border-top: 2px solid var(--state);
+}
+.modal-head { padding: 16px var(--gutter) 10px; border-bottom: 1px solid var(--line-soft); }
+.modal-head h3 {
+  margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .16em;
+  text-transform: uppercase;
+}
+.modal-sub { font-size: 12.5px; color: var(--dim); margin-top: 4px; }
+.modal-body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 14px var(--gutter);
+}
+.modal-body > .lockwhy {
+  font-size: 12px; color: var(--warn); margin-bottom: 12px;
+  border-left: 2px solid var(--warn); padding-left: 9px;
+}
+.modal-foot {
+  display: flex; gap: var(--gap); background: var(--surface);
+  border-top: 1px solid var(--line);
+  padding: 12px var(--gutter) calc(12px + env(safe-area-inset-bottom, 0px));
+}
+.modal-foot .btn { flex: 1 1 0; }
+
+/* The matrix. Phones (the default): each change stacks as
+     name ............ [WHERE]
+     50 %  →  40 %
+     ✓ verdict
+   so nothing can overflow sideways at 390 px. Wider: a real four-column
+   table, with the verdict spanning the row beneath. */
+.mx { border-top: 1px solid var(--line); margin-bottom: 14px; }
+.mx-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 10px; row-gap: 4px; align-items: baseline;
+  padding: 10px 0; border-bottom: 1px solid var(--line-soft);
+}
+.mx-head { display: none; }
+.mx-name { font-size: 13.5px; overflow-wrap: anywhere; }
+.mx-where { justify-self: end; }
+.mx-chg {
+  grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 8px;
+  align-items: baseline; font-family: var(--mono); font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.mx-cur { color: var(--dim); overflow-wrap: anywhere; }
+.mx-arrow { color: var(--dimmer); }
+.mx-new { color: var(--state); font-weight: 600; overflow-wrap: anywhere; }
+.mx-res { grid-column: 1 / -1; font-family: var(--mono); font-size: 11.5px;
+          overflow-wrap: anywhere; }
+.mx-res:empty { display: none; }
+.mx-res.busy { color: var(--dim); }
+.mx-res.ok   { color: var(--ok); }
+.mx-res.warn { color: var(--warn); }
+.mx-res.bad  { color: var(--danger); }
+
+@media (min-width: 560px) {
+  .mx-row { grid-template-columns: minmax(0, 2fr) 64px minmax(0, 1fr) minmax(0, 1fr); }
+  .mx-head {
+    display: grid; padding: 6px 0; color: var(--dim);
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em;
+    text-transform: uppercase;
+  }
+  .mx-where { justify-self: start; }
+  .mx-chg { display: contents; }
+  .mx-arrow { display: none; }
+}
+
+@media (min-width: 720px) {
+  /* Tabs move to the top here, so the bar takes the viewport bottom. */
+  .pbar { bottom: 0; padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .pbar-row { grid-template-columns: minmax(0, 1fr) 220px; }
+  .btn.act { width: auto; min-width: 220px; }
+  .modal-back { align-items: center; padding: 24px; }
+  .modal { border: 1px solid var(--state); max-height: min(100%, 760px); }
+  .modal-foot { padding-bottom: 12px; }
+}

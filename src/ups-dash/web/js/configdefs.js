@@ -37,7 +37,7 @@ export const TIER2 = [
 /* Shown so the reasoning is not lost, never editable from a web page. */
 export const TIER3 = [
   { name: "NUT pollinterval", value: "2 s", machine: "jetson",
-    why: "Setting this to 1 killed the APC HID interface mid-outage on 2026-09-20: /dev/hidraw1 vanished and the driver went Data stale while lsusb still showed the device. Do not retry." },
+    why: "Only refreshes status bits and timers — load, voltage and runtime follow pollfreq instead. The 2026-09-20 failure was a stall with no USB disconnect, which NUT 2.7.4 cannot recover from. /dev/hidraw1 “vanishing” was normal: usbhid-ups detaches the kernel HID driver while it holds the device." },
   { name: "Debounce", value: "3 samples", machine: "box",
     why: "Changes trigger semantics rather than a threshold." },
   { name: "Settle time", value: "30 s", machine: "box",

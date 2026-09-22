@@ -153,7 +153,7 @@ outage drains the pack — unavoidable on this hardware.
 | jetson: `ups-sentinel` | `WAKE_CHARGE_PCT` | **50%** |
 | jetson: `ups-sentinel` | `MAINS_STABLE_SEC` | 120 s |
 | jetson: `ups-sentinel` | `WAKE_TRIES` / `WAKE_INTERVAL` | 5 / 30 s |
-| jetson: `ups.conf` | `pollinterval` | **2 s** (1 s broke the driver) |
+| jetson: `ups.conf` | `pollinterval` / `pollfreq` | **2 s** (1 s stalled the UPS) / **10 s** (load, voltage, runtime freshness) |
 
 Hibernate at 30%, wake at 50% — the pack always recharges by at least 20 points before the
 box is allowed back.
@@ -445,6 +445,15 @@ working integration.
 
 The 150 W / 230 W figures come from the build sheet's standing GPU cap decision.
 
+> ## ↻ REVISED 2026-09-22 — the UPS output IS cut again, at a battery floor
+> Bench tests found a second register. `shutdown.reboot 1` (0x40) cuts the
+> output, then **restores it when mains returns**; `load.off.delay` (0x15)
+> latches OFF. ups-dash now *parks* the UPS once the box is down and the pack
+> reaches the floor (default 35 %), so the pack stops draining. With BIOS AC
+> BACK = Always On the box powers on with the mains, is put back to sleep by
+> ups-dash, and is then woken by the sentinel's normal gate. See
+> [UPS-TOOLING.md](UPS-TOOLING.md) §7 and BUILD-LOG.md 2026-09-22.
+>
 #> ## ⛔ SUPERSEDED 2026-09-20 — killpower is ABANDONED
 > Testing proved the UPS **does not re-energise its outlets** after `load.off.delay`.
 > It reports `OL OFF` on mains return and waits for a human to press its front-panel
@@ -503,8 +512,10 @@ shutdown.reboot  - Shut down the load briefly while rebooting the UPS
 shutdown.stop    - Stop a shutdown in progress
 ```
 
-⚠ **`shutdown.return` is NOT offered by this unit** — an earlier draft of this doc named
-it. Killpower here is **`load.off.delay`**:
+⚠ **`shutdown.return` was not offered by the 2.7.4 driver.** The NUT master driver
+(2026-09-22) offers it, mapped to the same 0x40 register as `shutdown.reboot 1`. That one
+cuts and then *restores*; `load.off.delay` below cuts and *stays off* — bench-tested,
+[UPS-TOOLING.md](UPS-TOOLING.md) §7. The killpower used here was **`load.off.delay`**:
 
 ```bash
 upscmd -u <admin> -p <secret> apc load.off.delay 20
@@ -532,8 +543,11 @@ preserved at ~75%.
 goes blind. The sentinel must never read "cannot reach UPS" as "mains returned"; see
 BUILD-LOG.md FINDING 3 for the bug this caused.
 
-⚠ **`pollinterval` must stay at 2 s.** Setting it to 1 s caused the APC HID interface to
-drop mid-outage (`/dev/hidraw1` vanished, driver alive but `Data stale`). Reverted.
+⚠ **`pollinterval` must stay at 2 s.** At 1 s the UPS stalled mid-outage: driver alive,
+`Data stale`, but **no USB disconnect** — the "vanished" `/dev/hidraw1` was normal, since
+NUT detaches the kernel HID driver when it claims the device. Re-diagnosed 2026-09-22
+([UPS-TOOLING.md](UPS-TOOLING.md) §2). The freshness knob is `pollfreq` (now 10 s), not
+`pollinterval`.
 
 ⚠ **`ups.delay.start` is empty** — this unit exposes no "restore after N seconds"
 variable. Whether the UPS re-energises its outlets by itself when mains returns is

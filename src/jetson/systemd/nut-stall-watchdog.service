@@ -1,0 +1,15 @@
+[Unit]
+Description=Restart the UPS driver when it stalls with the UPS still on the bus
+Documentation=file:///usr/local/sbin/nut-stall-watchdog
+After=nut-server.service
+Wants=nut-server.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/nut-stall-watchdog
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
