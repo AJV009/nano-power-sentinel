@@ -1973,12 +1973,22 @@ where the records prove one.
 the governor hibernated at 23:06:41). The dashboard's projection and the
 governor's own trigger are separate calculations. Not yet fixed.
 
+### A long-running job survived the whole cycle
+
+The all-core CPU burner started before the outage was still running, and
+still burning, after:
+
+    hibernate -> UPS park -> output cut entirely -> AC BACK power-on
+    -> re-hibernate -> gated WoL wake
+
+That is the headless-workload case demonstrated rather than assumed: a
+process does not notice a deep outage, only that wall-clock time passed.
+
 ### Self-inflicted, noted
 
-The CPU burner ran with a wall-clock deadline so it would not survive the
-hibernate. It was still inside that window when the box resumed, so it kept
-burning ~216 W until killed by hand. Kill load generators explicitly at the
-end of a test.
+The burner's wall-clock deadline had not passed when the box resumed, so it
+kept burning ~216 W until killed by hand. Kill load generators explicitly at
+the end of a test rather than trusting a deadline to have expired.
 
 ⚠ And `pkill -f <pattern>` matched its own ssh command line twice tonight,
 killing the shell. Use `pkill -f "[b]urn[.]py"`, and never put the literal
