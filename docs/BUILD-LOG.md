@@ -2008,3 +2008,24 @@ merely "off by default":
 
 The only three things that can put this box down are now the governor during
 an outage, the park guard after one, and an explicit Hibernate.
+
+---
+
+## 2026-09-22 — The "hibernate imminent" push, fixed
+
+It fired ~3 min early during the park test: "~48 s" at 23:03:53, and the
+governor hibernated at 23:06:41.
+
+**Cause.** The dashboard reported the governor's **margin** as if it were a
+countdown. The margin is `runtime x (charge - reserve) / charge - cost -
+safety`, and it does not fall one second per second: the UPS's own runtime
+estimate moves with the load. On the night it sat near 99 s for minutes.
+
+**Fix.** `derive.margin_rate()` measures how fast the margin is actually
+closing, over a 180 s window, and the ETA is `margin / that rate`. Below
+0.02 s per second it publishes **no** ETA rather than a countdown that will
+not come true. The push now also quotes the margin and its rate, so the
+projection can be judged instead of believed.
+
+On the real readings from that night: old ETA 49 s (alert), new ETA 236 s
+(no alert) against an actual 2 min 49 s.

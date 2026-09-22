@@ -157,6 +157,13 @@ class Collector(object):
         if ram_gb is None and self._box_data:
             ram_gb = (self._box_data.get("mem") or {}).get("used_gb")
         drain = derive.drain_rate(self.ring, now, ups.get("charge"))
+        # How fast the governor's own margin is shrinking, measured rather
+        # than assumed to be 1 s per second (derive.margin_rate).
+        cost = derive.hibernate_cost(ram_gb, self.tunables)
+        slope = derive.margin_rate(
+            self.ring, now,
+            derive._margin(ups.get("runtime"), ups.get("charge"), cost,
+                           self.tunables), cost, self.tunables)
 
         # Surfaced live so the UI can show a countdown and an abort button
         # while a scheduled output cut is still cancellable.
@@ -192,7 +199,8 @@ class Collector(object):
             "down_cause": down_cause,
             "derived": derive.project(ups, box_state, ups.get("charge"),
                                       ups.get("runtime"), self.tunables,
-                                      ram_gb, drain, down_cause, testing),
+                                      ram_gb, drain, down_cause, testing,
+                                      slope),
             "tunables": self.tunables,
             "services": self.services,
             "self_test": self_test,

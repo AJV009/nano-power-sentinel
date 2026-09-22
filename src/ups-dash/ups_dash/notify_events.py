@@ -126,9 +126,18 @@ def _hibernate_imminent(prev, curr, ts):
     c_imminent = (c_mode == "battery" and isinstance(c_eta, (int, float))
                  and c_eta <= HIBERNATE_IMMINENT_SEC)
     if c_imminent and not p_imminent:
+        # Quote the governor's own margin and how fast it is closing, so the
+        # projection can be judged rather than taken on faith: reporting the
+        # margin ITSELF as the ETA sent this push ~3 min early on 2026-09-22.
+        margin = _g(curr, "derived", "hibernate_margin_sec")
+        rate = _g(curr, "derived", "margin_rate_sec_per_sec")
+        detail = ""
+        if isinstance(margin, (int, float)) and isinstance(rate, (int, float)):
+            detail = (" The governor's margin is %ds and closing %.2f s per "
+                      "second." % (int(margin), rate))
         return [(events.HIBERNATE_IMMINENT, "Hibernate imminent",
                  ("hibernate-governor is projected to hibernate the box in "
-                  "~%ds.%s" % (max(0, int(c_eta)), ep_suffix(curr))),
+                  "~%ds.%s%s" % (max(0, int(c_eta)), detail, ep_suffix(curr))),
                  "max", ["rotating_light", "hourglass_flowing_sand"], ts)]
     return []
 

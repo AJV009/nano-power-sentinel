@@ -6,6 +6,8 @@ independent guess that could disagree with it.
 """
 
 DRAIN_WINDOW = 300.0
+MARGIN_WINDOW = 180.0     # the margin moves in 12 s steps (pollfreq), so wide
+MIN_MARGIN_RATE = 0.02    # s per s: below this, call it flat rather than guess
 
 
 def drain_rate(ring, now, charge, window=DRAIN_WINDOW):
@@ -29,6 +31,45 @@ def drain_rate(ring, now, charge, window=DRAIN_WINDOW):
     return round((oldest["charge"] - charge) / dt_min, 3)
 
 
+def _margin(runtime, charge, cost, tunables):
+    """The governor's own margin: how much slack it has left before it must
+    hibernate. It compares runtime-to-reserve against cost + safety."""
+    if runtime is None or not charge or cost is None:
+        return None
+    to_reserve = runtime * (charge - tunables["reserve_pct"]) / charge
+    return to_reserve - cost - tunables["safety_sec"]
+
+
+def margin_rate(ring, now, margin_now, cost, tunables, window=MARGIN_WINDOW):
+    """How fast the margin is shrinking, in seconds per second. None when
+    there is not enough history.
+
+    WHY THIS EXISTS: the margin was being reported directly as "hibernate in
+    N s", which assumes it falls a second per second. It does not -- it is
+    runtime x (charge - reserve) / charge, and the UPS's own runtime estimate
+    moves as the load changes. On 2026-09-22 the margin sat near 99 s for
+    minutes while the alert had already claimed "~48 s", so the push landed
+    ~3 min early. Measuring the slope keeps the projection honest.
+    """
+    if margin_now is None:
+        return None
+    old = None
+    for snap in ring:
+        if snap["ts"] >= now - window:
+            old = snap
+            break
+    if not old:
+        return None
+    dt = now - old["ts"]
+    if dt < 30:
+        return None
+    ups = old.get("ups") or {}
+    then = _margin(ups.get("runtime"), ups.get("charge"), cost, tunables)
+    if then is None:
+        return None
+    return (then - margin_now) / dt
+
+
 def hibernate_cost(ram_gb, tunables):
     if ram_gb is None:
         return None
@@ -37,7 +78,7 @@ def hibernate_cost(ram_gb, tunables):
 
 
 def project(ups, box_state, charge, runtime, tunables, ram_gb, drain,
-            down_cause=None, self_test=False):
+            down_cause=None, self_test=False, margin_slope=None):
     """Numbers only. The NARRATIVE lives in states.classify().
 
     `mode` here is kept for the timeline's three visual modes, but it must not
@@ -66,9 +107,20 @@ def project(ups, box_state, charge, runtime, tunables, ram_gb, drain,
             to_reserve = runtime * (charge - tunables["reserve_pct"]) / charge
             out["runtime_to_reserve_sec"] = round(to_reserve, 1)
             cost = out["hibernate_cost_sec"]
-            if cost is not None:
-                out["eta_hibernate_sec"] = round(
-                    to_reserve - cost - tunables["safety_sec"], 1)
+            margin = _margin(runtime, charge, cost, tunables)
+            if margin is not None:
+                # The margin is what the governor compares; the ETA is when
+                # that margin reaches zero at its OWN measured rate. Reporting
+                # the margin as an ETA alerted ~3 min early (2026-09-22).
+                out["hibernate_margin_sec"] = round(margin, 1)
+                out["margin_rate_sec_per_sec"] = (
+                    round(margin_slope, 3) if margin_slope is not None else None)
+                if margin <= 0:
+                    out["eta_hibernate_sec"] = 0
+                elif margin_slope is not None and margin_slope > MIN_MARGIN_RATE:
+                    out["eta_hibernate_sec"] = round(margin / margin_slope, 1)
+                # else: shrinking too slowly to call -- leave it None rather
+                # than publish a countdown that will not come true.
     elif (box_state in ("hibernated", "unreachable") and charge is not None
           and down_cause == "outage"):
         # Only an OUTAGE-caused absence recovers automatically. The sentinel
