@@ -88,6 +88,7 @@ SAMPLE_COLS = [
 # mains-idle stream is the only thing that grows without bound, so it rolls up.
 IDLE_KEEP_DAYS = 7
 ROLLUP_RES = 3600
+EVENT_PAD = 300          # an episode card also shows 5 min either side
 
 
 class Store(object):
@@ -191,12 +192,29 @@ class Store(object):
         ep = rows[0]
         ep["trace"] = self._rows(
             "SELECT * FROM sample WHERE episode_id=? ORDER BY ts", (ep_id,))
+        # By time, not by episode_id: the power log's lines (logbook.py) land
+        # before an episode opens and after it closes, and those minutes are
+        # exactly the lead-in and the aftermath the card should show.
+        end = ep["ended"] if ep.get("ended") else time.time()
         ep["events"] = self._rows(
-            "SELECT * FROM event WHERE episode_id=? ORDER BY ts", (ep_id,))
+            "SELECT * FROM event WHERE ts BETWEEN ? AND ? ORDER BY ts",
+            (ep["started"] - EVENT_PAD, end + EVENT_PAD))
         return ep
 
     def recent_events(self, limit=100):
         return self._rows("SELECT * FROM event ORDER BY ts DESC LIMIT ?", (limit,))
+
+    def events_before(self, before=None, limit=200, since=None):
+        """The power log, newest first: `limit` events older than `before`
+        (default now), none older than `since`."""
+        return self._rows(
+            "SELECT * FROM event WHERE ts < ? AND ts >= ? ORDER BY ts DESC LIMIT ?",
+            (before if before is not None else time.time() + 60,
+             since if since is not None else 0, limit))
+
+    def last_event_ts(self, kind):
+        rows = self._rows("SELECT MAX(ts) AS ts FROM event WHERE kind=?", (kind,))
+        return rows[0]["ts"] if rows else None
 
     def samples_since(self, since, res=30):
         return self._rows(

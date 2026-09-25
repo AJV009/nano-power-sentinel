@@ -39,6 +39,8 @@ from .park_arm import (ArmMixin, ARMED, PARKED, RETURNING, SETTLE_SEC,  # noqa: 
                        CUT_TIMEOUT_SEC, STUCK_SEC)
 from .park_guard import (GuardMixin, GUARD_SEC, REHIB_RETRY_SEC,  # noqa: F401
                          REHIB_MAX_TRIES, DOWN_CONFIRM_SEC, RETURN_OB_SEC)
+from .park_stuck import (StuckMixin, POWERED_PCT, STUCK_SEC as PRE_OS_SEC,  # noqa: F401
+                         MAX_CYCLES, CYCLE_TIMEOUT_SEC)
 
 PHASES = (ARMED, PARKED, RETURNING)
 FILE_EVERY = 10.0        # re-read /etc/ups-dash/tunables.json at most this often
@@ -48,10 +50,10 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-class ParkTracker(ArmMixin, GuardMixin):
+class ParkTracker(ArmMixin, GuardMixin, StuckMixin):
     def __init__(self, store=None, instcmd=None, hibernate=None,
                  declare_intent=None, spawn=None, ledger=None,
-                 file_tunables=None):
+                 file_tunables=None, lan_present=None):
         self.store = store
         self._instcmd = instcmd                # None = upscmd.instcmd
         self._hibernate = hibernate or park_io.hibernator()
@@ -59,6 +61,8 @@ class ParkTracker(ArmMixin, GuardMixin):
         self._spawn = spawn or park_io.spawn_thread
         self.ledger = ledger or park_io.default_ledger()
         self._read_file = file_tunables or park_io.read_local
+        self._lan_present = lan_present or park_io.lan_present
+        self._cycled_at = None             # a power-cycle ACKed: pushed
         self._file, self._file_at = {}, None
         self.tun = park_io.resolve(None, None)
         self._job = None
@@ -90,6 +94,7 @@ class ParkTracker(ArmMixin, GuardMixin):
         # already done happened while nobody was watching (park_guard.py).
         self._saw_parked = False
         self._blind_return = False
+        self._reset_stuck()
 
     @property
     def phase(self):
@@ -164,6 +169,9 @@ class ParkTracker(ArmMixin, GuardMixin):
         if job.kind == "rehibernate":
             self._event(now, states.BOX_REHIBERNATED, ctx)
             return
+        if job.kind == "powercycle":
+            self._reap_cycle(now, ok, ctx)
+            return
         if not ok:
             info = info if isinstance(info, dict) else {"reply": info}
             self._fail_at = now
@@ -179,7 +187,8 @@ class ParkTracker(ArmMixin, GuardMixin):
         self.m = {"phase": ARMED, "armed_at": c["at"], "charge": c["charge"],
                   "floor": c["floor"], "hold_at_park": c["hold_at_park"],
                   "cause_at_park": c["cause_at_park"],
-                  "returned_at": None, "rehibernate_sent": None}
+                  "returned_at": None, "rehibernate_sent": None,
+                  "cycles": 0, "cycle_sent": None}
         self._save()
         self._event(now, states.UPS_PARK_ARMED, ctx)
 
@@ -239,6 +248,13 @@ class ParkTracker(ArmMixin, GuardMixin):
                 "guard_until": back + GUARD_SEC if _num(back) else None,
                 "tries": self._tries, "blocked": self._blocked,
                 "skipped_at": self._skipped_at,
+                "powered_at": self._pow_since if self._pow_seen else None,
+                "on_lan": self._lan_seen, "cycles": m.get("cycles") or 0,
+                "cycling": m.get("cycle_sent") is not None,
+                "max_cycles": MAX_CYCLES,
+                "cycled_at": self._cycled_at,
+                "outcome_watts": (self.outcome or {}).get("watts"),
+                "outcome_cycles": (self.outcome or {}).get("cycles"),
                 "failed_at": failed.get("at"),
                 "failed_stage": failed.get("stage"),
                 "failed_detail": failed.get("detail")}

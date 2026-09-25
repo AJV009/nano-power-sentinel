@@ -11,13 +11,22 @@ import json
 import subprocess
 
 UNIT = "hibernate-governor"
+# systemd-sleep logs "Performing sleep operation 'hibernate'" and "System
+# returned from sleep operation" under this unit: the box's own account of
+# going down and coming back, for the dashboard's power log. Tagged by unit
+# so ups-dash's learner still reads the governor's lines only.
+SLEEP_UNIT = "systemd-hibernate.service"
+# ...but only these two of its lines; the rest (freeze/thaw, PID 1's own
+# "Starting System Hibernate") is noise, and must not crowd the governor's
+# startup line out of the first read, which ups-dash learns tunables from.
+SLEEP_KEEP = ("Performing sleep operation", "System returned from sleep")
 LINES = 100
 TIMEOUT = 5
 
 
 def read_journal(cursor=None):
-    cmd = ["journalctl", "-u", UNIT, "-o", "json", "--no-pager"]
-    cmd += ["--after-cursor", cursor] if cursor else ["-n", str(LINES)]
+    cmd = ["journalctl", "-u", UNIT, "-u", SLEEP_UNIT, "-o", "json", "--no-pager"]
+    cmd += ["--after-cursor", cursor] if cursor else ["-n", str(LINES * 4)]
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, timeout=TIMEOUT)
@@ -42,7 +51,10 @@ def read_journal(cursor=None):
             ts = None
         last = rec.get("__CURSOR", last)
         if msg:
-            events.append({"ts": ts, "msg": msg})
+            unit = (rec.get("_SYSTEMD_UNIT") or "").replace(".service", "")
+            if unit != UNIT and not any(k in msg for k in SLEEP_KEEP):
+                continue
+            events.append({"ts": ts, "msg": msg, "unit": unit})
     return events[-LINES:], last, None
 
 

@@ -13,6 +13,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .lanprobe import WHY as LAN_WHY
+
+BOX_POLL = 5.0
+HIBERNATE_MEMORY = 900     # how long a HIBERNATING log line explains absence
+
 
 class BoxClient(object):
     def __init__(self, base_url, timeout=3.0):
@@ -42,3 +47,42 @@ class BoxClient(object):
         if gov.get("cursor"):
             self.cursor = gov["cursor"]
         return data
+
+
+class BoxStateMixin(object):
+    """The collector's box half: poll box-agent, and say what the box is
+    doing when it does not answer. Split out of collector.py (300-line cap);
+    reads the Collector's fields (box, lan, learner, logbook, store, ...)."""
+
+    def _poll_box(self, now):
+        data = self.box.fetch()
+        if data is None:
+            return
+        self._box_data = data
+        self._box_seen = now
+        # Logged whole; the learner gets hibernate-governor's lines only.
+        self.learner.feed(self.logbook.box_lines(
+            (data.get("governor") or {}).get("events"), self.episodes.id))
+        bid = data.get("boot_id")
+        if self._boot_id and bid and bid != self._boot_id:
+            # boot_id survives hibernate and changes on a real reboot, so this
+            # is the definitive "it cold-booted rather than resumed" signal.
+            self.store.add_event(now, "box_rebooted", self.episodes.id,
+                                 {"old": self._boot_id, "new": bid})
+        self._boot_id = bid or self._boot_id
+
+    def _box_state(self, now):
+        agent = bool(self._box_seen) and now - self._box_seen < BOX_POLL * 3
+        self.lan.want(not agent)
+        if agent:
+            return "awake", "agent responding"
+        # Positive evidence of a running OS beats memory (lanprobe.py).
+        os_ = self.lan.verdict(now)
+        if os_ in ("windows", "firewalled"):
+            return "other_os", LAN_WHY[os_]
+        if now - self.learner.last_hibernate_signal < HIBERNATE_MEMORY:
+            return "hibernated", "governor reported HIBERNATING"
+        if not self._box_seen:
+            return "unknown", "never seen since collector start"
+        return "unreachable", (LAN_WHY["linux"] if os_ == "linux"
+                               else self.box.last_error or "no response")

@@ -171,10 +171,28 @@ def park_text(pk, on_battery, wake_at):
             "parked. %s" % (charge, after), None)
 
 
-def park_return_text(awake, charge, wake_at, held):
+def park_return_text(awake, charge, wake_at, held, pk=None):
     """(short, sentence, detail, action) for a park's return: the guard
     putting a box that powered itself on back to sleep (HIBERNATING), or --
-    `awake` False -- still waiting for it to power on at all (PARKED)."""
+    `awake` False -- still waiting for it to power on at all (PARKED), or
+    powered on and still booting (park_stuck.py)."""
+    pk = pk or {}
+    if not awake and pk.get("on_lan"):
+        return ("Box on LAN, agent silent",
+                "Box is on the network · box-agent not answering",
+                "The box powered on with the mains and answers on the LAN, "
+                "but box-agent does not: it may have booted another OS, or "
+                "the agent is down. It is never power-cycled in this state.",
+                None)
+    if not awake and pk.get("powered_at"):
+        return ("Box booting",
+                "Box powered on with the mains · waiting for it to boot",
+                "The UPS load rose right after the output returned, so AC BACK "
+                "powered the box on. A normal resume reaches the network in "
+                "about a minute. If it is still silent and off the LAN after 7 "
+                "minutes it is stuck before its OS (firmware or boot menu), and "
+                "the UPS power-cycles it -- at most %d times." % pk_max(pk),
+                None)
     if not awake:
         return ("Mains back", "Mains back after a park · waiting for the box to power on",
                 "The UPS output is back. The park took the box's standby "
@@ -199,9 +217,68 @@ def park_return_text(awake, charge, wake_at, held):
             % (_n(charge), _n(wake_at)), None)
 
 
-def park_no_power_text(parked_charge):
+def other_os_text(on_battery, charge, runtime):
+    """(short, sentence, detail, action) for a box up on another OS --
+    Windows, as far as the LAN can tell (lanprobe.py)."""
+    if on_battery:
+        return ("ON BATTERY · box on Windows",
+                "ON BATTERY · box on Windows · nothing will hibernate it",
+                "The box is running another OS, where neither the governor nor "
+                "box-agent runs. Nothing will put it to sleep: it keeps drawing "
+                "from the pack (%s%%, ~%s min at this load) until the UPS is "
+                "empty and cuts it hard." % (_n(charge), _n(runtime // 60)
+                                              if isinstance(runtime, int) else "?"),
+                "Shut Windows down now, or reboot into Linux so the governor "
+                "protects it.")
+    return ("Box on Windows",
+            "Box is up on Windows · not monitored",
+            "The box answers on the LAN but not like Linux: it is running "
+            "another OS -- Windows, most likely. The governor and box-agent "
+            "only run in Linux, so while it is here an outage will NOT "
+            "hibernate it, and the UPS will not park.",
+            None)
+
+
+def pk_max(pk):
+    return pk.get("max_cycles") or 2      # park_stuck.MAX_CYCLES, via the snapshot
+
+
+def park_cycle_text(pk):
+    """(short, sentence, detail, action) while a stuck box is power-cycled."""
+    return ("Power-cycling the box",
+            "Box stuck before its OS · power-cycling it (%s of %d)"
+            % (_n(pk.get("cycles")), pk_max(pk)),
+            "The box has drawn power since the output returned but never "
+            "reached its OS or the network. The UPS cuts its output for a few "
+            "seconds (shutdown.reboot, ~60 s after the command) and the BIOS "
+            "powers the box on again. Nothing is lost: it never got as far as "
+            "reading its hibernate image.", None)
+
+
+def park_no_power_text(pk):
     """(short, sentence, detail, action) once the guard window closed with the
-    box never seen -- shown until it is next seen awake."""
+    box never seen -- shown until it is next seen awake. Which of the three
+    outcomes (park_stuck.py) decides what to tell the human."""
+    parked_charge, outcome = pk.get("outcome_charge"), pk.get("outcome")
+    if outcome == "stuck_pre_os":
+        return ("Stuck before its OS",
+                "Box is ON but never booted · hold its power button",
+                "After the park the box powered on with the mains (the UPS "
+                "shows %s W) but never reached its OS or the network%s. That "
+                "is a hang in the firmware or the boot menu -- DDR5 memory "
+                "training after a full power loss is the usual one."
+                % (_n(pk.get("outcome_watts")),
+                   ", even after %s power-cycle(s)" % _n(pk.get("outcome_cycles"))
+                   if pk.get("outcome_cycles") else ""),
+                "Hold the power button ~10 s, then press it once. Before that, "
+                "note which status LED is lit on the board (CPU / DRAM / VGA / "
+                "BOOT). Its hibernate image is untouched, so it resumes.")
+    if outcome == "lan_no_agent":
+        return ("On LAN, agent silent", "Box is up on the network · box-agent silent",
+                "After the park the box powered on and answers on the LAN, but "
+                "box-agent never did: it may have booted another OS, or the "
+                "agent failed to start.",
+                "Check the box's screen; restart box-agent if it is Linux.")
     return ("Needs power button", "Box is off · press its power button",
             "The UPS parked at %s%% and its output came back with the mains, "
             "but the box did not power itself on within 10 minutes. Its BIOS "

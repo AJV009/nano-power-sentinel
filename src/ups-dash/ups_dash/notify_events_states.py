@@ -61,9 +61,15 @@ def state_events(prev, curr, ts):
     out = []
     p = (prev.get("state") or {}).get("state")
     c = (curr.get("state") or {}).get("state")
+    st = curr.get("state") or {}
+    # On another OS nothing hibernates the box: an outage there is the one
+    # case this system cannot handle by itself. Booting Windows is not news.
+    # A severity edge inside one state, so it comes before the early return.
+    if (c == states.OTHER_OS and st.get("severity") == "critical"
+            and _g(prev, "state", "severity") != "critical"):
+        out.append(_meta_item(events.BOX_OTHER_OS_ON_BATTERY, st, curr, ts))
     if c == p:
         return out   # nothing crossed a state boundary this tick
-    st = curr.get("state") or {}
 
     # The park's headline. Its later phases stay PARKED, so they are silent.
     if c == states.PARKED and park_phase(curr) == states.PARK_ARMED:
@@ -113,9 +119,14 @@ def state_events(prev, curr, ts):
                     st.get("short") or "Waiting at wake gate",
                     _state_text(st, curr), "low", ["hourglass"], ts))
 
+    outcome = _g(curr, "park", "outcome")
     if (c == states.BOX_LOST and p != states.BOX_LOST
-            and _g(curr, "park", "outcome") == states.PARK_NO_POWER_ON):
-        out.append(_meta_item(events.PARK_NO_POWER_ON, st, curr, ts))
+            and outcome in states.PARK_OUTCOMES):
+        # A park's end with the box not back: the three ways it can happen
+        # need three different things from a human (park_stuck.py).
+        out.append(_meta_item(events.PARK_NO_POWER_ON
+                              if outcome == states.PARK_NO_POWER_ON
+                              else outcome, st, curr, ts))
     elif c == states.BOX_LOST and p != states.BOX_LOST:
         out.append((events.BOX_LOST, st.get("short") or "Box unreachable",
                     _state_text(st, curr), "high",
@@ -152,22 +163,32 @@ _FAILED_TEXT = {
                    "hibernates it at the next outage.",
     "marker": "The park marker could not be kept on disk, so the box was "
               "left up rather than put to sleep with no wake coming.",
+    "cycle": "The box was stuck before its OS after the park, and the UPS "
+             "would not power-cycle it. It needs its power button.",
 }
 
 
 def park_events(prev, curr, ts):
-    """The two park facts that are not state boundaries: the park was
-    skipped because the box was still up (the governor is not doing its
-    job), and a park step failed. Both are stamped once by park.py
-    (`skipped_at`, `failed_at`) and pushed on the stamp's edge."""
+    """The park facts that are not state boundaries: the park was skipped
+    because the box was still up (the governor is not doing its job), a park
+    step failed, and a stuck box is being power-cycled. Each is stamped once
+    by park.py (`skipped_at`, `failed_at`, `cycled_at`) and pushed on the
+    stamp's edge."""
     out = []
     for kind, key in ((events.UPS_PARK_SKIPPED, "skipped_at"),
-                      (events.PARK_FAILED, "failed_at")):
+                      (events.PARK_FAILED, "failed_at"),
+                      (events.BOX_POWER_CYCLED, "cycled_at")):
         stamp = _g(curr, "park", key)
         if stamp is None or stamp == _g(prev, "park", key):
             continue
         meta = events.meta(kind)
-        if kind == events.UPS_PARK_SKIPPED:
+        if kind == events.BOX_POWER_CYCLED:
+            msg = ("The box powered on with the mains after the park but has "
+                   "not reached its OS or the network in 7 minutes, so the UPS "
+                   "is power-cycling it (try %s of %s). Its hibernate image is "
+                   "untouched." % (_n(_g(curr, "park", "cycles")),
+                                   _n(_g(curr, "park", "max_cycles"))))
+        elif kind == events.UPS_PARK_SKIPPED:
             msg = ("The pack is at or below the %s%% park floor and under the "
                    "governor's reserve, but the box is still up -- it would be "
                    "hard-cut, so the UPS was not parked. The hibernate "

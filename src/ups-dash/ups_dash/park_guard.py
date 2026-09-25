@@ -87,6 +87,10 @@ class GuardMixin(object):
             self._job = park_io.Job("rehibernate", self._hibernate, ctx,
                                     self._spawn)
             return
+        if sent is None and self._stuck(now, ups, ok, ob,
+                                        "OFF" in (ups.get("flags") or []),
+                                        testing):
+            return                              # a power-cycle in flight
         if sent is not None:
             # Once a request is out the window no longer applies: clearing
             # the marker while the box is still up would stand the sentinel
@@ -97,15 +101,22 @@ class GuardMixin(object):
                 self._end(now)   # back asleep, with standby power this time
             return
         if not _num(back) or now - back >= GUARD_SEC:
-            # Never came up. AC BACK is probably not Always On, and WoL cannot
-            # reach a box that lost standby power: only its button can help.
+            # Never reached the agent. Which way (park_stuck.py): no power
+            # drawn at all -- AC BACK is probably not Always On; powered but
+            # never on the LAN -- stuck before the OS; on the LAN but silent
+            # -- another OS, or the agent died. Only a human can help now.
             # Remembered on disk until the box is next seen awake.
-            self.outcome = {"outcome": states.PARK_NO_POWER_ON, "ts": now,
+            kind = self._stuck_outcome()
+            self.outcome = {"outcome": kind, "ts": now,
                             "armed_at": m.get("armed_at"),
-                            "returned_at": back, "charge": m.get("charge")}
+                            "returned_at": back, "charge": m.get("charge"),
+                            "cycles": m.get("cycles") or 0,
+                            "watts": ups.get("watts")}
             self.ledger.set(park_io.OUTCOME, self.outcome)
-            self._event(now, states.PARK_NO_POWER_ON,
-                        {"returned_at": back, "charge": ups.get("charge")})
+            self._event(now, kind, {"returned_at": back,
+                                    "charge": ups.get("charge"),
+                                    "cycles": m.get("cycles") or 0,
+                                    "watts": ups.get("watts")})
             self._end(now)
 
     def _keep_up(self, now, charge, hold):

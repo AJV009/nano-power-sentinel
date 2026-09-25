@@ -13,7 +13,7 @@ import queue
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import actions
+from . import actions, logtext
 from . import config as cfgmod
 from . import upsops
 
@@ -145,8 +145,19 @@ def make_handler(collector, store):
                 except Exception:
                     return self._json(400, {"error": "bad episode id"})
                 ep = store.episode(ep_id)
+                if ep:
+                    ep["events"] = [logtext.describe(r) for r in ep["events"]]
                 return self._json(200 if ep else 404,
                                   ep or {"error": "no such episode"})
+
+            if route == "/api/log":
+                # The power log, newest first; page with ?before=<oldest ts>.
+                limit = min(int(qs.get("limit") or 200), 1000)
+                before = float(qs["before"]) if qs.get("before") else None
+                since = float(qs["since"]) if qs.get("since") else None
+                rows = store.events_before(before, limit, since)
+                return self._json(200, {"events": [logtext.describe(r)
+                                                   for r in rows]})
 
             if route == "/api/health":
                 snap = collector.snapshot() or {}

@@ -5,7 +5,8 @@
    second rendering of what the NOW timeline already says. */
 
 import { get } from "./api.js";
-import { dur, pct, num, clock, dateLabel, DASH, isNum, esc } from "./format.js";
+import { dur, pct, clock, dateLabel, isNum, esc } from "./format.js";
+import { listHtml, renderPowerLog } from "./powerlog.js";
 
 const KIND = { outage: "Outage", box_absent: "Box absent",
                manual_hibernate: "Manual hibernate", test: "Test" };
@@ -42,6 +43,7 @@ function card(ep) {
       </div>
       <div class="detail">${summary(ep)}</div>
       <div class="trace" id="trace-${ep.id}"></div>
+      <div class="ep-log" id="log-${ep.id}"></div>
     </div>`;
 }
 
@@ -84,7 +86,11 @@ function drawTrace(host, trace) {
 }
 
 export async function renderHistory(root) {
-  root.innerHTML = '<section class="panel"><h2>Episodes</h2><div id="eps">loading…</div></section>';
+  root.innerHTML = `
+    <section class="panel"><h2>Episodes</h2><div id="eps">loading…</div></section>
+    <section class="panel powerlog" id="powerlog"></section>`;
+  // Not awaited: the episodes and the log load side by side.
+  renderPowerLog(root.querySelector("#powerlog"));
   let payload;
   try {
     payload = await get("api/episodes?limit=40");
@@ -104,15 +110,26 @@ export async function renderHistory(root) {
     node.addEventListener("click", async () => {
       const id = node.dataset.ep;
       const t = node.querySelector(`#trace-${id}`);
-      if (t.dataset.open === "1") { t.innerHTML = ""; t.dataset.open = "0"; return; }
+      const lg = node.querySelector(`#log-${id}`);
+      if (t.dataset.open === "1") {
+        t.innerHTML = lg.innerHTML = "";
+        t.dataset.open = "0";
+        return;
+      }
       t.innerHTML = "loading trace…";
       t.dataset.open = "1";
       try {
         const detail = await get(`api/episode/${id}`);
         drawTrace(t, detail.trace || []);
+        // Everything logged from 5 min before it opened to 5 min after it
+        // closed, oldest first: the whole story, not just its summary line.
+        lg.innerHTML = `<div class="ep-log-h">What happened</div>${listHtml(detail.events || [])}`;
       } catch (e) {
         t.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
       }
     });
   });
+  // Reading or selecting inside an open card must not fold it away.
+  host.querySelectorAll(".trace, .ep-log").forEach((n) =>
+    n.addEventListener("click", (ev) => ev.stopPropagation()));
 }

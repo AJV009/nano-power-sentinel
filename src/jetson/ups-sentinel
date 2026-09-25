@@ -66,12 +66,10 @@ PARK_STALE_SEC    = 1800.0
 RUN_DIR           = "/run/ups-sentinel"
 HEARTBEAT_SEC     = 30.0
 
-
 # ---- dashboard-editable tunables ------------------------------------------
-# Values above may be overridden from TUNABLES_FILE.  That file is ADVISORY:
-# anything missing, malformed, mistyped or out of range leaves the compiled-in
-# default untouched, and a bad file can NEVER stop this process from starting.
-# That single property is what makes it safe to let a web page write here.
+# TUNABLES_FILE is ADVISORY: anything missing, malformed or out of range keeps
+# the default above, and a bad file can NEVER stop this process starting --
+# which is what makes it safe to let a web page write it.
 TUNABLES_FILE = "/etc/ups-dash/tunables.json"
 TUNABLE_SPEC = {
     "wake_charge_pct":   ("WAKE_CHARGE_PCT",  20.0, 100.0),
@@ -163,27 +161,28 @@ def main():
     outage_seen = False     # only wake a box that went down because of an outage
     ol_since    = None      # when mains last became continuously present
     wake_tries  = 0
-    next_wake   = 0.0
-    last_wol    = 0.0
-    last_report = 0.0
-    last_blind  = 0.0
+    next_wake   = last_wol = 0.0
+    last_report = last_blind = 0.0
     exhausted   = False     # reported only: WoL given up on for this outage
     stale_hold  = None      # placement time of a hold judged stale (ignored)
     started     = time.time()
 
     def pace(deferring=None, gate=None):
-        """End of a pass: publish what it decided, then wait for the next."""
+        """End of a pass: publish what it decided, then wait for the next.
+        Intervals run on the monotonic clock; published stamps are wall."""
+        w = lambda t: round(wall - (now - t), 3) if t else None
         publish({"pid": os.getpid(), "started": started, "state": state,
-                 "outage_seen": outage_seen, "ups_status": st, "ol_since": ol_since,
+                 "outage_seen": outage_seen, "ups_status": st, "ol_since": w(ol_since),
                  "gate": gate, "wake": {"tries": wake_tries, "max": int(WAKE_TRIES),
-                                        "last_wol": last_wol or None,
+                                        "last_wol": w(last_wol),
                                         "exhausted": exhausted},
                  "deferring": deferring, "tunables": {
                      k: float(globals()[n]) for k, (n, _, _) in TUNABLE_SPEC.items()}})
         time.sleep(POLL)
 
     while True:
-        now = time.time()
+        # Intervals are monotonic: no RTC battery, NTP jumped +3 h (09-24).
+        now, wall = time.monotonic(), time.time()
         load_tunables()
         st  = ups_status()
 
@@ -198,7 +197,8 @@ def main():
         on_batt = "OB" in st.split()
 
         if on_batt:
-            if state != "onbatt":
+            # ol_since set: mains came back since, so a NEW outage (09-25).
+            if state != "onbatt" or ol_since is not None:
                 # Arm the wake only for a box the OUTAGE actually took down.
                 # One already off (hibernated by hand) is not a casualty, and
                 # waking it overrules a human (2026-09-21: off 19:05, woken 21:06).

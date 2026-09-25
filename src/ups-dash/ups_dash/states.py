@@ -28,16 +28,14 @@ and OB -- but never over an emergency cut of ours, and never over a UPS
 shutdown timer that is counting: a real cut must not hide behind a test.
 """
 
-# The complete EVENT vocabulary lives in events.py and is re-exported here on
-# purpose: callers import one module and get the whole language -- states,
-# causes and event kinds. Keeping them in separate files is only the 300-line
-# rule; conceptually this is one vocabulary and must stay that way, because
-# the last time the store and the notifier knew different event names, a
-# manual shutdown got recorded and never alerted.
+# events.py is re-exported: ONE vocabulary (states, causes, event kinds), two
+# files only for the 300-line rule. When the store and the notifier knew
+# different event names, a manual shutdown was recorded and never alerted.
 from .events import *        # noqa: F401,F403
 from . import events         # noqa: F401  (for events.meta / events.CATALOG)
 from .states_text import (_n, output_off_text, self_test_text, park_text,
-                          park_return_text, park_no_power_text, recovering_text)
+                          park_return_text, park_no_power_text, recovering_text,
+                          park_cycle_text, other_os_text)
 
 # ---- why the box went away ------------------------------------------------
 CAUSE_OUTAGE = "outage"
@@ -69,10 +67,14 @@ BOX_LOST = "box_lost"
 SELF_TEST = "self_test"
 NOMINAL = "nominal"
 PARKED = "parked"
+OTHER_OS = "other_os"      # up on another OS -- Windows (lanprobe.py)
 
-# ---- the battery-floor park (park.py): marker phases and its one outcome --
+# ---- the battery-floor park (park.py): marker phases and its outcomes -----
 PARK_ARMED, PARK_PARKED, PARK_RETURNING = "armed", "parked", "returning"
 PARK_NO_POWER_ON = "no_power_on"     # the box never powered itself back on
+PARK_STUCK_PRE_OS = "stuck_pre_os"   # powered on, never reached its OS
+PARK_LAN_NO_AGENT = "lan_no_agent"   # on the LAN, box-agent silent
+PARK_OUTCOMES = (PARK_NO_POWER_ON, PARK_STUCK_PRE_OS, PARK_LAN_NO_AGENT)
 
 # severity drives the accent colour and notification priority. SELF_TEST is
 # "ok", not "nominal": something IS happening, it is just benign.
@@ -80,7 +82,7 @@ SEV = {
     BLIND: "unknown", OUTPUT_OFF: "critical", ON_BATTERY: "warn",
     HIBERNATING: "warn", OUTAGE_DOWN: "warn", RECOVERING: "ok",
     MANUAL_DOWN: "ok", BOX_LOST: "warn", SELF_TEST: "ok", NOMINAL: "nominal",
-    PARKED: "warn",
+    PARKED: "warn", OTHER_OS: "ok",
 }
 
 
@@ -147,6 +149,10 @@ def classify(ups, box_state, down_cause, tunables, episode=None,
     pk = park or {}
     if pk.get("phase") in (PARK_ARMED, PARK_PARKED):
         return _mk(PARKED, *park_text(pk, ups.get("on_battery"), wake_at))
+    # A power-cycle of a box stuck before its OS (park_stuck.py): the output
+    # going OFF for seconds is ours, not a dead output.
+    if pk.get("phase") == PARK_RETURNING and pk.get("cycling"):
+        return _mk(PARKED, *park_cycle_text(pk))
 
     # 1. Cannot read the UPS. With no data we do not know whether mains is
     #    present, so we assert nothing and hold.
@@ -174,7 +180,7 @@ def classify(ups, box_state, down_cause, tunables, episode=None,
     if pk.get("phase") == PARK_RETURNING and (awake or not pk.get("rehibernate_sent")):
         held = bool(wake_hold) or bool(pk.get("hold_at_park"))
         return _mk(HIBERNATING if awake else PARKED,
-                   *park_return_text(awake, charge, wake_at, held))
+                   *park_return_text(awake, charge, wake_at, held, pk))
 
     # 3. Something is actively taking the box down RIGHT NOW. Worth its own
     #    state so the UI stops showing a countdown that has already elapsed.
@@ -192,9 +198,15 @@ def classify(ups, box_state, down_cause, tunables, episode=None,
                       else "hibernating the box"),
                    detail, action="Abort from the box controls if unintended.")
 
+    # Up on another OS: nothing of ours runs there. On battery, nothing will
+    # hibernate it -- critical, whatever SEV says for the calm case.
+    if box_state == OTHER_OS:
+        st = _mk(OTHER_OS, *other_os_text(on_batt, charge, ups.get("runtime")))
+        return dict(st, severity="critical") if on_batt else st
+
     # After a park WoL cannot reach the box (no standby power): only its button.
-    if pk.get("outcome") == PARK_NO_POWER_ON and box_state != "awake":
-        return _mk(BOX_LOST, *park_no_power_text(pk.get("outcome_charge")))
+    if pk.get("outcome") in PARK_OUTCOMES and box_state != "awake":
+        return _mk(BOX_LOST, *park_no_power_text(pk))
 
     eta = eta_hibernate_sec    # box still up only: once down, "NOW" hid OUTAGE_DOWN
     if on_batt and box_state == "awake" and eta is not None and eta <= 0:

@@ -54,7 +54,9 @@ class JournalTail(object):
                     with self._lock:
                         self._pending.append({
                             "ts": ts,
-                            "unit": rec.get("_SYSTEMD_UNIT") or "?",
+                            # PID 1's lines about a unit (Started/Stopped)
+                            # carry it in UNIT; their own is init.scope.
+                            "unit": rec.get("UNIT") or rec.get("_SYSTEMD_UNIT") or "?",
                             "msg": msg,
                         })
                         if len(self._pending) > self._maxlen:

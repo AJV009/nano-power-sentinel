@@ -2029,3 +2029,108 @@ projection can be judged instead of believed.
 
 On the real readings from that night: old ETA 49 s (alert), new ETA 236 s
 (no alert) against an actual 2 min 49 s.
+
+---
+
+## 2026-09-25 — Six hours powered on and invisible: stuck before the OS
+
+The box was hibernated by hand on Thursday. On Friday two outages ran the pack
+to the 35 % floor and the UPS parked at 15:56. Mains returned at 15:59:47, and
+4 s later the UPS load went from 0 to **164 W**: AC BACK worked and the box was
+ON. It then sat at 104–112 W, with a black screen and no ARP reply on the LAN,
+for six hours. Meanwhile the dashboard said "press its power button: AC BACK is
+probably not Always On". A forced power-off and one press brought the box back
+**resuming Thursday's image** (boot_id unchanged, uptime 5 days).
+
+**Why that pins the stage.** The kernel wipes the hibernate signature the moment
+it finds the image (`swsusp_check`). The image was intact at 22:01, so the
+afternoon attempt never reached Linux. It hung in the firmware or the boot menu.
+DDR5 training after a full power loss (B850M, 9900X, 96 GB) is the likely
+stage. The logs agree: idle Linux here draws ~43 W, and Tuesday's good return
+went 147 W → ~75 W while resuming → online in 55 s. This one never left the
+~110 W early-boot plateau.
+
+**Fixed: `park_stuck.py`.** While the guard waits after a return:
+- load ≥ 6 % is the box powering on (logged once per power-on);
+- powered for **7 min**, agent silent and **not on the LAN** (`/proc/net/arp`)
+  means stuck. The UPS power-cycles it with the park's own command on mains
+  (`shutdown.reboot 1`: cut ~60 s later, back ~4 s after, bench test 1), and
+  AC BACK powers it on again. At most **2** cycles per park story.
+- powered and **on** the LAN but agent silent means another OS, or a dead
+  agent. It is never cycled.
+
+The guard's end now has three outcomes: `no_power_on` (no draw at all),
+`stuck_pre_os` ("hold its power button", note the board's DRAM/CPU/VGA/BOOT
+LED) and `lan_no_agent`. While a cycle is in flight, classify says PARKED
+("power-cycling it"), never OUTPUT_OFF, whose push says "press the UPS
+button". `tests/test_park_stuck.py` drives the real tracker through S1–S7:
+today's story, a normal return, on-LAN, no power, a refused cycle, an ignored
+cycle, and a box that boots after one cycle.
+
+⚠ **The residual risk.** `shutdown.reboot` cannot be taken back. A box that
+finishes POST in the minute between the command and the cut is cut mid-resume
+and cold-boots. That is why the threshold is 7 min, against a normal ~1 min.
+
+### The sentinel: monotonic intervals, and a second outage logged
+
+- **Clock jump (09-24).** The jetson has no RTC battery. After the SD swap it
+  booted at the saved time, and NTP stepped the clock +3 h 44 s in. The
+  sentinel timed "mains stable 120 s" on the wall clock, so a jump mid-window
+  would count as 3 h of stable mains. Every interval is now
+  `time.monotonic()`; `state.json` still publishes wall-clock stamps.
+- **Unlogged outage (09-25).** With the box off by hand, the sentinel's state
+  never left `onbatt` between the two outages, so the second "MAINS LOST" was
+  never written. A new OB after mains returned is now a new outage.
+- Test scenarios Q (a +3 h jump mid-window: the WoL still waits 120 s) and R
+  (two outages, box off: both logged, never woken). The old build fails both.
+
+### The power log (HISTORY)
+
+The diagnosis above took four logs and a LAN sweep; HISTORY showed two cards.
+`logbook.py` now writes it down as it happens, as ordinary events tagged by
+source:
+- **ups**: status flags changing, draw steps ≥ 40 W while the box is not up,
+  every 10 % on battery;
+- **box**: box state changes, plus hibernate-governor's and systemd-sleep's
+  lines relayed by box-agent;
+- **sentinel** and **nut**: journal lines, including the stall watchdog;
+- **dash**: the dashboard's own verdict changing, and its start with the
+  jetson's uptime;
+- **jetson**: wall-clock jumps.
+
+Repeating lines collapse (numbers masked, once per 10 min, with a count), and
+the draw is logged only while the box is not up, so the SD card is not
+written every tick. `logtext.py` words each row on the server.
+
+On the page:
+- HISTORY has a **Power log** panel with source filters, which it remembers.
+- An open episode card lists everything from 5 min before it opened to 5 min
+  after it closed.
+- `scripts/backfill-powerlog.py` replayed the week before (305 events), so
+  episode 14 reads as the story above.
+
+### Windows
+
+Booted into Windows, the box answers ARP at its usual address but drops ping
+and every TCP port without a reset (the firewall's Public profile). No
+NetBIOS, SSDP or mDNS reply either. `lanprobe.py` asks while the agent is
+silent: ssh open/refused or TTL ≤ 64 is Linux (dead agent); TTL 65–128 or
+RPC/SMB open is Windows; on the LAN and silent is "firewalled", Windows'
+default. The last two are a new box state, **`other_os`**:
+- never parked;
+- not "down" for the cause tracker, and it ends a wake hold like any power-on;
+- no hibernate ETA;
+- on battery it turns **critical** and pushes, because nothing hibernates
+  Windows. It runs until the pack is flat.
+
+Idle Windows draws ~69 W (8 %).
+
+### What the UPS can and cannot say about its sockets
+
+It cannot. There are no `outlet.*` variables, and the full HID descriptor has
+no `OutletSystem` collection. There is only the total `ups.load` (1 % of 865 W,
+~12 s fresh). Surge-only sockets are not metered at all. The unknown vendor
+group `ff860090.*` (1, 25, 0, 0, 1, 4, 4) *may* be a power-saving
+master/controlled-outlet setting **[inference]**; it is a setting, not a
+reading. Keep other devices on the surge-only sockets and the load means "the
+box".

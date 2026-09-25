@@ -127,6 +127,14 @@ itself on when the output returns. ups-dash then puts it back to sleep, and
 the sentinel's gate wakes it properly. With "Always Off", every long outage
 ends with a box that needs its power button pressed.
 
+⚠ **Dual boot.** The governor and box-agent run only in Linux. While the box
+is in Windows the dashboard shows "Box on Windows" (it tells from the LAN:
+lanprobe.py), and an outage is the one case nothing handles: it pushes, but
+nothing hibernates Windows. Give Windows its own UPS client (WinNUT-Client
+against the sentinel's upsd, with a monitor-only user), or shut it down
+yourself when mains fails. Allowing ICMP echo in Windows' firewall lets the
+dashboard say "Windows" (TTL 128) rather than "most likely Windows".
+
 ---
 
 ## 2. Sentinel: NUT with the UPS on USB

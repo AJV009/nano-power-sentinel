@@ -60,7 +60,9 @@ def run(name, scenario, until, expect_wol, extra=None):
     logs, wols, pubs = [], [], []
     m.load_tunables = lambda initial=False: None
     m.WAKE_INTERVAL = extra.get("interval", m.WAKE_INTERVAL)
-    m.time = types.SimpleNamespace(time=lambda: clock["t"],
+    jump = extra.get("jump") or (lambda t: 0.0)     # wall-clock step at t
+    m.time = types.SimpleNamespace(time=lambda: clock["t"] + jump(clock["t"]),
+                                   monotonic=lambda: clock["t"],
                                    sleep=lambda s: _sleep(s))
     def _sleep(s):
         clock["t"] += s
@@ -268,6 +270,17 @@ results.append(run("O. restarted at an outage with a stale hold, box up -> MUST 
 # P. Every scenario above stubs load_tunables. Its file handling now lives in
 # ups_sentinel_io: it must still land in THIS module's globals (which main()
 # reads and state.json reports), and a bad file must still change nothing.
+# Q. CLOCK JUMP (09-24): no RTC battery, NTP stepped +3 h. Still 120 s monotonic.
+results.append(run("Q. wall clock jumps +3h mid-window -> WoL still waits 120s",
+    lambda t: {"st": OB if 100 <= t < 300 else OL, "up": t < 150},
+    700, True, {"jump": lambda t: 10800.0 if t >= 320 else 0.0,
+                "check": lambda logs, wols: bool(wols) and wols[0] >= 420}))
+# R. TWO OUTAGES, box off by hand (09-25): the second used to go unlogged.
+results.append(run("R. second outage while off by hand is logged, never woken",
+    lambda t: {"st": OB if (100 <= t < 200 or 300 <= t < 400) else OL, "up": False},
+    700, False, {"check": lambda logs, wols:
+                 sum("MAINS LOST" in msg for _, msg in logs) == 2}))
+
 def tunables():
     m, logs = load(), []
     m.log = lambda msg: logs.append(msg)

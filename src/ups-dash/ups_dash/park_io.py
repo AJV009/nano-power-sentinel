@@ -85,6 +85,29 @@ def hibernator(box_url=None):
     return lambda: control.box_hibernate(url)
 
 
+ARP_TABLE = "/proc/net/arp"
+ATF_COM = 0x2            # the entry resolved: something answered ARP
+
+
+def lan_present(ip=None, table=ARP_TABLE):
+    """Does the box's NIC answer ARP right now? The collector polls box-agent
+    every 5 s, so the kernel keeps asking; a resolved entry means an OS (or
+    at least a live NIC stack) is up at that address. A box stuck in its
+    firmware never resolves -- 2026-09-25, not one reply in six hours. Never
+    raises: unreadable reads as absent."""
+    ip = ip or settings.BOX_IP
+    try:
+        with open(table) as fh:
+            next(fh, None)                               # the header row
+            for line in fh:
+                cols = line.split()
+                if len(cols) >= 3 and cols[0] == ip:
+                    return bool(int(cols[2], 16) & ATF_COM)
+    except Exception:
+        pass
+    return False
+
+
 def spawn_thread(fn):
     """Run `fn` on a daemon thread. instcmd can take 3 x 8 s against a hung
     upsd and box_hibernate 25 s against a half-booted box; neither may stall

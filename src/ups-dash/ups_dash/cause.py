@@ -119,7 +119,9 @@ class CauseTracker(object):
         return cause
 
     def _update(self, now, box_state, on_battery, park):
-        awake = (box_state == "awake")
+        # Another OS (lanprobe.py) is a box somebody is using: up, for every
+        # purpose here -- a hold from before is over once they boot it.
+        awake = box_state in ("awake", "other_os")
 
         if awake:
             came_back = (self._was_awake is False)

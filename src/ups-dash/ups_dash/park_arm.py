@@ -36,8 +36,9 @@ class ArmMixin(object):
                 or not _num(charge) or charge > tun["floor"]):
             self._cond_since = self._awake_since = None
             return
-        if box == "awake":
-            # Never park a running box: the armed cut would hard-kill it.
+        if box in ("awake", "other_os"):
+            # Never park a running box: the armed cut would hard-kill it --
+            # Windows included (lanprobe.py), whose draw alone would block.
             self._cond_since = None
             self._blocked = "box awake"
             self._awake_at_floor(now, charge)

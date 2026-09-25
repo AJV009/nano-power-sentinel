@@ -103,7 +103,8 @@ def project(ups, box_state, charge, runtime, tunables, ram_gb, drain,
     if ups.get("on_battery") and not self_test:
         out["mode"] = "battery"
         out["eta_empty_sec"] = runtime
-        if runtime is not None and charge:
+        # No governor runs on another OS (lanprobe.py): no hibernate ETA.
+        if runtime is not None and charge and box_state != "other_os":
             to_reserve = runtime * (charge - tunables["reserve_pct"]) / charge
             out["runtime_to_reserve_sec"] = round(to_reserve, 1)
             cost = out["hibernate_cost_sec"]
@@ -132,7 +133,7 @@ def project(ups, box_state, charge, runtime, tunables, ram_gb, drain,
             out["eta_wake_sec"] = 0
         elif drain is not None and drain < -0.01:
             out["eta_wake_sec"] = round(gap / (-drain) * 60.0, 1)
-    elif box_state != "awake":
+    elif box_state not in ("awake", "other_os"):
         # Down, but not for a reason that auto-recovers.
         out["mode"] = "down"
     return out

@@ -53,6 +53,15 @@ UPS_PARK_SKIPPED = "ups_park_skipped"
 BOX_REHIBERNATED = "box_rehibernated"
 PARK_NO_POWER_ON = "park_no_power_on"
 PARK_FAILED = "park_failed"
+# ...and a box that powered on but never reached its OS (park_stuck.py). The
+# two outcomes are stored under the park's outcome names (states.py).
+BOX_POWERED_ON = "box_powered_on"
+BOX_STUCK_PRE_OS = "box_stuck_pre_os"
+BOX_POWER_CYCLED = "box_power_cycled"
+UPS_OUTPUT_BACK_CYCLE = "ups_output_back_cycle"
+BOX_LAN_NO_AGENT = "box_lan_no_agent"
+# ...and a box up on another OS (lanprobe.py), where nothing hibernates it.
+BOX_OTHER_OS_ON_BATTERY = "box_other_os_on_battery"
 
 # ---- recovery -------------------------------------------------------------
 WAKE_GATE_WAIT = "wake_gate_wait"
@@ -80,6 +89,17 @@ QUEUE_OVERFLOW = "queue_overflow"
 # ---- episodes -------------------------------------------------------------
 EPISODE_START = "episode_start"
 EPISODE_END = "episode_end"
+
+# ---- the power log (logbook.py): stored for HISTORY, never pushed ----------
+UPS_STATUS = "ups_status"          # the UPS's own flags changed: OL -> OB ...
+UPS_LOAD_STEP = "ups_load_step"    # the draw jumped while the box was not up
+UPS_CHARGE_STEP = "ups_charge_step"  # every 10 % on battery
+BOX_STATE = "box_state"            # awake / hibernated / unreachable
+DASH_STATE = "dash_state"          # the dashboard's own verdict changed
+SENTINEL_LOG = "sentinel_log"      # a line from ups-sentinel
+NUT_LOG = "nut_log"                # nut-driver / upsd / upsmon / watchdog
+BOX_LOG = "box_log"                # hibernate-governor + systemd-sleep, on the box
+JETSON_CLOCK_JUMP = "jetson_clock_jump"
 
 
 def _e(label, severity, priority, tags, notify=True):
@@ -137,6 +157,15 @@ CATALOG = {
     BOX_REHIBERNATED: _e("Back to sleep after power-on", "ok", "default", ["zzz", "computer"]),
     PARK_NO_POWER_ON: _e("Box needs its power button", "warn", "high", ["warning", "computer"]),
     PARK_FAILED: _e("UPS park failed", "critical", "high", ["rotating_light", "battery"]),
+    BOX_POWERED_ON: _e("Box powered on with the mains", "nominal", "low", ["electric_plug"], notify=False),
+    BOX_STUCK_PRE_OS: _e("Box stuck before its OS", "warn", "high", ["warning", "computer"], notify=False),
+    BOX_POWER_CYCLED: _e("Power-cycling a stuck box", "warn", "high", ["arrows_counterclockwise", "computer"]),
+    UPS_OUTPUT_BACK_CYCLE: _e("Output back after power-cycle", "nominal", "low", ["electric_plug"], notify=False),
+    BOX_LAN_NO_AGENT: _e("Box on LAN, agent silent", "warn", "default", ["question"], notify=False),
+    BOX_OTHER_OS_ON_BATTERY: _e("ON BATTERY · box on Windows", "critical", "max", ["rotating_light", "computer"]),
+    "stuck_pre_os": _e("Box stuck before its OS", "critical", "high", ["rotating_light", "computer"]),
+    "lan_no_agent": _e("Box on LAN, agent silent", "warn", "high", ["warning", "computer"]),
+    "no_power_on": _e("Box needs its power button", "warn", "high", ["warning", "computer"]),
 
     WAKE_GATE_WAIT: _e("Waiting to wake the box", "ok", "low", ["hourglass"]),
     WAKE_GATE_PASSED: _e("Wake gate reached", "ok", "low", ["hourglass_flowing_sand"]),
@@ -161,6 +190,16 @@ CATALOG = {
 
     EPISODE_START: _e("Episode opened", "warn", "low", ["hourglass"], notify=False),
     EPISODE_END: _e("Episode closed", "ok", "low", ["white_check_mark"], notify=False),
+
+    UPS_STATUS: _e("UPS status", "nominal", "min", [], notify=False),
+    UPS_LOAD_STEP: _e("Power draw changed", "nominal", "min", [], notify=False),
+    UPS_CHARGE_STEP: _e("Battery", "nominal", "min", [], notify=False),
+    BOX_STATE: _e("Box", "nominal", "min", [], notify=False),
+    DASH_STATE: _e("Dashboard", "nominal", "min", [], notify=False),
+    SENTINEL_LOG: _e("Sentinel", "nominal", "min", [], notify=False),
+    NUT_LOG: _e("NUT", "nominal", "min", [], notify=False),
+    BOX_LOG: _e("Box log", "nominal", "min", [], notify=False),
+    JETSON_CLOCK_JUMP: _e("Jetson clock jumped", "warn", "min", [], notify=False),
 }
 
 

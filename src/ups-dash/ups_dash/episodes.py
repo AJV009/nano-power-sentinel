@@ -92,6 +92,12 @@ class EpisodeTracker(object):
             pk = park or {}
             if pk.get("phase") in ("armed", "parked") and cur.get("park_charge") is None:
                 cur["park_charge"] = pk.get("charge", charge)
+            if pk.get("powered_at") and not cur.get("powered"):
+                cur["powered"] = True            # AC BACK worked (park_stuck.py)
+            if pk.get("cycles"):
+                cur["cycles"] = max(cur.get("cycles") or 0, pk["cycles"])
+            if pk.get("outcome") and pk.get("outcome") != cur.get("outcome"):
+                cur["outcome"] = pk.get("outcome")
             if prev in ("hibernated", "unreachable") and box_state == "awake":
                 # Last wins: after a park the box powers on with the mains and
                 # is put back to sleep, then the sentinel's WoL wakes it.
@@ -113,6 +119,13 @@ class EpisodeTracker(object):
             bits.append("hibernated at %g%%" % cur["down_charge"])
         if cur.get("park_charge") is not None:
             bits.append("UPS parked at %g%%" % cur["park_charge"])
+        if cur.get("cycles"):
+            bits.append("stuck before its OS, power-cycled %d×" % cur["cycles"])
+        why = {"stuck_pre_os": "box never booted (stuck before its OS)",
+               "lan_no_agent": "box on the LAN, agent silent",
+               "no_power_on": "box did not power on"}.get(cur.get("outcome"))
+        if why and not cur.get("resumed_at"):
+            bits.append(why)
         if cur.get("resumed_at"):
             bits.append("back %s via %s" % (
                 time.strftime("%H:%M", time.localtime(cur["resumed_at"])),

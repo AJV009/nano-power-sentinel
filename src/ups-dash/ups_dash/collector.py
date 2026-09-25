@@ -16,9 +16,11 @@ import threading
 import time
 
 from . import derive, ledger, nanovitals, nut, services, upsblock
-from .boxpoll import BoxClient
+from .boxpoll import BOX_POLL, BoxClient, BoxStateMixin
 from .episodes import EpisodeTracker
 from .journal import JournalTail
+from .lanprobe import LanProbe
+from .logbook import Logbook
 from .notify import Notifier
 from .sample import flatten
 from .tunables import Learner
@@ -29,25 +31,26 @@ from .park import ParkTracker
 from .upsextras import UpsExtras
 
 UPS_POLL = 1.0
-BOX_POLL = 5.0
 SERVICE_POLL = 30.0
 IDLE_PERSIST = 30.0        # res=30 cadence while nothing is happening
 RING_SECONDS = 3600        # 60 min of 1 Hz history in RAM, never on disk
 MAINTAIN_EVERY = 3600
-HIBERNATE_MEMORY = 900     # how long a HIBERNATING log line explains absence
 
 NANO_UNITS = ["nut-driver.service", "nut-server.service",
               "nut-monitor.service", "ups-sentinel.service"]
+TAIL_UNITS = NANO_UNITS + ["nut-stall-watchdog.service"]   # logged, not health-checked
 
 
-class Collector(object):
+class Collector(BoxStateMixin):
     def __init__(self, store, ups_name=None, box_url=None):
         ups_name = ups_name or settings.UPS_NAME
         box_url = box_url or settings.BOX_URL
         self.store = store
         self.nut = nut.NutClient(ups=ups_name)
         self.box = BoxClient(box_url)
-        self.tail = JournalTail(NANO_UNITS)
+        self.tail = JournalTail(TAIL_UNITS)
+        self.logbook = Logbook(store)       # the power log (HISTORY)
+        self.lan = LanProbe()               # what runs when the agent is silent
         # The state ledger (ledger.py): our facts in dash.json, the
         # sentinel's in its state file. Loaded, the legacy marker files
         # folded in, and re-persisted BEFORE anything below reads a hold, a
@@ -96,33 +99,11 @@ class Collector(object):
     def _poll_services(self):
         self.services = services.poll(NANO_UNITS)
 
-    def _poll_box(self, now):
-        data = self.box.fetch()
-        if data is None:
-            return
-        self._box_data = data
-        self._box_seen = now
-        self.learner.feed((data.get("governor") or {}).get("events"))
-        bid = data.get("boot_id")
-        if self._boot_id and bid and bid != self._boot_id:
-            # boot_id survives hibernate and changes on a real reboot, so this
-            # is the definitive "it cold-booted rather than resumed" signal.
-            self.store.add_event(now, "box_rebooted", self.episodes.id,
-                                 {"old": self._boot_id, "new": bid})
-        self._boot_id = bid or self._boot_id
-
-    def _box_state(self, now):
-        if self._box_seen and now - self._box_seen < BOX_POLL * 3:
-            return "awake", "agent responding"
-        if now - self.learner.last_hibernate_signal < HIBERNATE_MEMORY:
-            return "hibernated", "governor reported HIBERNATING"
-        if not self._box_seen:
-            return "unknown", "never seen since collector start"
-        return "unreachable", self.box.last_error or "no response"
-
     # ---- the loop -----------------------------------------------------
 
     def run(self):
+        self.logbook.started(time.time(), self.episodes.id)
+        self.lan.start()
         self.tail.start()
         self._poll_services()
         while True:
@@ -141,7 +122,7 @@ class Collector(object):
 
     def _tick(self):
         now = time.time()
-        self.learner.feed(self.tail.drain())
+        self.learner.feed(self.logbook.lines(self.tail.drain(), self.episodes.id))
         if self._due("box", now, BOX_POLL):
             self._poll_box(now)
         if self._due("svc", now, SERVICE_POLL):
@@ -234,6 +215,7 @@ class Collector(object):
         # start/verdict, into the event log. Never raises.
         self.extras.record(self.store, self._notify_prev, snap,
                            self.episodes.id, testing, now)
+        self.logbook.observe(snap, now, self.episodes.id)
         # Enqueue-only: all network I/O happens on the notifier's own thread,
         # so an unreachable ntfy server can never stall power monitoring.
         try:
